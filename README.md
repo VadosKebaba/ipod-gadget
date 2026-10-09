@@ -59,16 +59,29 @@ Check the messages from `dmesg` and verify that the device `/dev/iap0` is availa
 
 ## Raspberry Pi (Pi 5, also Zero / Zero 2 / 4) with Raspberry Pi OS
 
+Build the [client app](https://github.com/oandrew/ipod) for the Pi on any machine with Go
+(`GOARCH=arm64` for 64-bit Raspberry Pi OS, which is what a Pi 5 runs) and copy the `ipod` binary to the Pi:
+
+```
+git clone https://github.com/oandrew/ipod.git
+cd ipod
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/ipod
+```
+
+Then on the Pi:
+
 ```
 git clone https://github.com/oandrew/ipod-gadget.git
 cd ipod-gadget
-sudo bash install-rpi.sh
+sudo bash install-rpi.sh /path/to/ipod
 sudo reboot
 ```
 
 `install-rpi.sh` installs the kernel headers and DKMS (so the modules get rebuilt after every kernel update),
 enables USB device mode (`dtoverlay=dwc2,dr_mode=peripheral` in `/boot/firmware/config.txt`)
 and loads the modules at boot. Module options (`swap_configs`, `only_ipod`, `product_id`) go in `/etc/modprobe.d/ipod-gadget.conf`.
+Given the client binary, it installs it as `/usr/local/bin/ipod` with the `ipod-client` service, which keeps
+`/dev/iap0` open from boot on (`journalctl -u ipod-client -f` shows the iAP traffic). Run it again with a new binary to update the client.
 
 The modules build against the Pi 5 kernels of Raspberry Pi OS Bookworm (6.12) and Trixie (6.18),
 including the default 16K-page `rpi-2712` kernel. To cross compile for a Pi 5 instead,

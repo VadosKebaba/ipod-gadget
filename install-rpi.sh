@@ -6,9 +6,16 @@
 #   - puts the USB controller in device mode: dtoverlay=dwc2,dr_mode=peripheral
 #     (on the Pi 5 that is the USB-C port)
 #   - loads the gadget at boot
-# Usage: sudo ./install-rpi.sh   then reboot.
+#   - optionally installs the iAP client (https://github.com/oandrew/ipod, built for
+#     linux/arm64) as a service that starts at boot: pass the binary as the argument
+# Usage: sudo ./install-rpi.sh [path/to/ipod]   then reboot.
 set -euo pipefail
 
+client=
+if [ $# -gt 0 ]; then
+	[ -f "$1" ] || { echo "no such file: $1" >&2; exit 1; }
+	client=$(readlink -f "$1")
+fi
 cd "$(dirname "$(readlink -f "$0")")"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -76,12 +83,30 @@ if [ ! -f /etc/modprobe.d/ipod-gadget.conf ]; then
 EOF
 fi
 
+echo "== iAP client"
+if [ -n "$client" ]; then
+	# also catches a binary built for the wrong architecture
+	if ! "$client" lingos > /dev/null 2>&1; then
+		echo "$client doesn't run here: build it with GOOS=linux GOARCH=arm64" >&2
+		exit 1
+	fi
+	install -m 755 "$client" /usr/local/bin/ipod
+	install -m 644 ipod-client.service /etc/systemd/system/ipod-client.service
+	systemctl daemon-reload
+	systemctl enable ipod-client.service
+	systemctl try-restart ipod-client.service
+	echo "installed /usr/local/bin/ipod, ipod-client.service starts at boot"
+else
+	echo "skipped: pass the client binary to install it, e.g. sudo ./install-rpi.sh ./ipod"
+fi
+
 cat <<EOF
 
 Done. Reboot, then check:
   lsmod | grep g_ipod                   # modules loaded
   ls /sys/class/udc                     # the dwc2 controller is in device mode
   ls /dev/iap0 && aplay -l | grep iPod  # iAP device and the iPodUSB sound card
-The head unit only sees the iPod while the client app has /dev/iap0 open:
-  https://github.com/oandrew/ipod
+  systemctl status ipod-client          # the client, which keeps /dev/iap0 open
+  journalctl -u ipod-client -f          # iAP traffic with the head unit
+The head unit only sees the iPod while the client has /dev/iap0 open.
 EOF

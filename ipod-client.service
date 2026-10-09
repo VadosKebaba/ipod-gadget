@@ -1,0 +1,16 @@
+# Runs the iAP client (https://github.com/oandrew/ipod) on /dev/iap0.
+# The head unit only sees the iPod while /dev/iap0 is open, so this keeps it open.
+# Installed by install-rpi.sh when it's given the client binary.
+[Unit]
+Description=iPod accessory protocol client for ipod-gadget
+After=systemd-modules-load.service
+# keep retrying: /dev/iap0 only exists once the gadget has bound to the USB controller
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/bin/ipod serve /dev/iap0
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

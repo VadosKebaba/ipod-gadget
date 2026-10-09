@@ -57,6 +57,35 @@ See doc/apple-usb.ids for the list of ids
 
 Check the messages from `dmesg` and verify that the device `/dev/iap0` is available.
 
+## Raspberry Pi (Pi 5, also Zero / Zero 2 / 4) with Raspberry Pi OS
+
+```
+git clone https://github.com/oandrew/ipod-gadget.git
+cd ipod-gadget
+sudo bash install-rpi.sh
+sudo reboot
+```
+
+`install-rpi.sh` installs the kernel headers and DKMS (so the modules get rebuilt after every kernel update),
+enables USB device mode (`dtoverlay=dwc2,dr_mode=peripheral` in `/boot/firmware/config.txt`)
+and loads the modules at boot. Module options (`swap_configs`, `only_ipod`, `product_id`) go in `/etc/modprobe.d/ipod-gadget.conf`.
+
+The modules build against the Pi 5 kernels of Raspberry Pi OS Bookworm (6.12) and Trixie (6.18),
+including the default 16K-page `rpi-2712` kernel. To cross compile for a Pi 5 instead,
+prepare a [Raspberry Pi kernel tree](https://github.com/raspberrypi/linux) with `bcm2712_defconfig`, then:
+
+```
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KERNEL_PATH=/path/to/rpi-linux
+```
+
+**Pi 5 wiring:** the only port of a Pi 5 that can be a USB device is the **USB-C power port**
+(the USB-A ports are host only). Connect that port to the dock / car, and power the Pi 5 some other way,
+e.g. 5 V into the GPIO header or a power HAT that feeds it: a dock's USB port can't supply a Pi 5 anyway.
+Both the car's port and the Pi's supply put 5 V on VBUS, so a data-only adapter (VBUS not connected)
+between them avoids tying the two supplies together; check on the bench that the head unit still detects the Pi that way.
+Powered through the header, the Pi 5 limits its USB-A ports to 600 mA unless `usb_max_current_enable=1` is set in `config.txt`
+(only with a supply that can deliver 5 A).
+
 ## client app
 
 Follow the instructions here: https://github.com/oandrew/ipod

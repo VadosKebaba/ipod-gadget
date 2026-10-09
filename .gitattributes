@@ -1,0 +1,3 @@
+# run on the Pi with bash: keep LF even in a Windows checkout
+*.sh text eol=lf
+dkms.conf text eol=lf

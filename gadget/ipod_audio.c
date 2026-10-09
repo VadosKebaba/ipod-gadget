@@ -24,8 +24,10 @@
 
 
 
-#define BUFFER_BYTES_MAX (PAGE_SIZE * 16)
-#define PRD_SIZE_MAX PAGE_SIZE
+// In bytes, not pages: the Raspberry Pi 5 kernel uses 16K pages, which would
+// quadruple the max buffer/period (and latency) compared to 4K-page kernels.
+#define PRD_SIZE_MAX 4096
+#define BUFFER_BYTES_MAX (PRD_SIZE_MAX * 16)
 
 #define MIN_PERIODS 4
 
@@ -210,10 +212,16 @@ static void ipod_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
 	//trace_printk("status=%d ep_enabled=%d\n", req->status, audio->in_ep_enabled);
 	//trace_ipod_req_out_done(req);
 
-	//if (req->status == -ESHUTDOWN)
-	if (!audio->in_ep_enabled || req->status)
+	if (!audio->in_ep_enabled || req->status == -ESHUTDOWN)
 		return;
-	
+
+	// Isochronous transfers can fail legitimately, e.g. dwc2 (Raspberry Pi) completes
+	// a request with -ENODATA when its frame was missed. Dropping the request here
+	// would lose it for good and audio stops once all NUM_USB_AUDIO_TRANSFERS are gone,
+	// so keep it in flight like u_audio does.
+	if (req->status)
+		trace_printk("status=%d\n", req->status);
+
 	// if(req->status) {
 	// 	usb_ep_free_request(audio->in_ep, req);
 	// 	return;
@@ -667,4 +675,5 @@ static struct usb_function_instance *ipod_audio_alloc_inst(void)
 DECLARE_USB_FUNCTION_INIT(ipod_audio, ipod_audio_alloc_inst, ipod_audio_alloc);
 
 MODULE_AUTHOR("Andrew Onyshchuk");
+MODULE_DESCRIPTION("iPod USB audio function: ALSA playback card iPodUSB");
 MODULE_LICENSE("GPL");

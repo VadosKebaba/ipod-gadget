@@ -238,24 +238,29 @@ static unsigned char ipod_hid_report[] = {
 	0x02, 0x01, 0x09, 0x01, 0x85, 0x09, 0x95, 0x3f, 0x92, 0x02, 0x01, 0xc0
 };
 
-static struct hid_descriptor ipod_hid_desc2 = {
+// HID class descriptor with a single report descriptor, i.e. the 9 bytes on the wire.
+// Defined here instead of using struct hid_descriptor: its layout changed in 6.12.34
+// (desc[] -> rpt_desc) and the change was also backported to older stable kernels,
+// so no kernel version check gets it right everywhere.
+// https://github.com/oandrew/ipod-gadget/issues/32
+struct ipod_hid_class_descriptor {
+	__u8   bLength;
+	__u8   bDescriptorType;
+	__le16 bcdHID;
+	__u8   bCountryCode;
+	__u8   bNumDescriptors;
+	__u8   bReportDescriptorType;
+	__le16 wReportDescriptorLength;
+} __attribute__ ((packed));
+
+static struct ipod_hid_class_descriptor ipod_hid_desc2 = {
 	.bLength =            9,
 	.bDescriptorType=    HID_DT_HID,
 	.bcdHID= cpu_to_le16(0x0111),
 	.bCountryCode=             0,
 	.bNumDescriptors =      1,
-// https://github.com/oandrew/ipod-gadget/issues/32
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,34)
-	.rpt_desc = {
-		.bDescriptorType = HID_DT_REPORT,
-		.wDescriptorLength = cpu_to_le16(sizeof(ipod_hid_report))
-	}
-#else
-	.desc = {{
-		.bDescriptorType = HID_DT_REPORT,
-		.wDescriptorLength = cpu_to_le16(sizeof(ipod_hid_report))
-	}}
-#endif
+	.bReportDescriptorType = HID_DT_REPORT,
+	.wReportDescriptorLength = cpu_to_le16(sizeof(ipod_hid_report))
 };
 
 

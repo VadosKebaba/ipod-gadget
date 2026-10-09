@@ -650,4 +650,5 @@ module_init(ipod_hid_mod_init);
 module_exit(ipod_hid_mod_exit);
 
 MODULE_AUTHOR("Andrew Onyshchuk");
+MODULE_DESCRIPTION("iPod HID function: iAP transport exposed as /dev/iap0");
 MODULE_LICENSE("GPL");

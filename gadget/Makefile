@@ -14,8 +14,12 @@ ccflags-y += -Wno-unused-variable -Wno-unused-function
 ccflags-y += -I$(src)
 
 all:
-	make -C $(KERNEL_PATH) M=$(PWD) modules
+	$(MAKE) -C $(KERNEL_PATH) M=$(CURDIR) modules
+
+# installs to /lib/modules/<kernel>/updates and runs depmod, so modprobe can find them
+install:
+	$(MAKE) -C $(KERNEL_PATH) M=$(CURDIR) modules_install
 
 clean:
-	make -C $(KERNEL_PATH) M=$(PWD) clean
+	$(MAKE) -C $(KERNEL_PATH) M=$(CURDIR) clean
 

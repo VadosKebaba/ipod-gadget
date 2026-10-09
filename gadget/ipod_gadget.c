@@ -80,13 +80,23 @@ static struct usb_function *ipod_audio_f;
 
 static int ipod_config_bind(struct usb_configuration *conf)
 {
-	
+	int ret;
 	DBG(conf->cdev, " = %s() \n", __FUNCTION__);
+	// A function that fails to bind keeps the interface numbers it allocated, so
+	// carrying on would publish a broken config that crashes (NULL deref in
+	// composite_setup) as soon as the host selects it. Fail the config instead.
 	if (!disable_audio) {
-		usb_add_function(conf, ipod_audio_f);
+		ret = usb_add_function(conf, ipod_audio_f);
+		if (ret < 0) {
+			ERROR(conf->cdev, "ipod_audio bind failed: %d\n", ret);
+			return ret;
+		}
 	}
-	usb_add_function(conf, ipod_hid_f);
-	return 0;
+	ret = usb_add_function(conf, ipod_hid_f);
+	if (ret < 0) {
+		ERROR(conf->cdev, "ipod_hid bind failed: %d\n", ret);
+	}
+	return ret;
 }
 
 static void ipod_config_unbind(struct usb_configuration *conf)
@@ -147,7 +157,11 @@ static int ipod_bind(struct usb_composite_dev *cdev)
 		return PTR_ERR(ipod_hid_f);
 	}
 
-	usb_add_config(cdev, &ipod_configuration, ipod_config_bind);
+	// On failure leave the iPod config out rather than failing the bind: composite
+	// doesn't call ipod_unbind() after a failed bind, so the instances above would leak.
+	if (usb_add_config(cdev, &ipod_configuration, ipod_config_bind) < 0) {
+		ERROR(cdev, "iPod configuration not available\n");
+	}
 	return ret;
 }
 
@@ -227,4 +241,5 @@ module_init(ipod_init);
 module_exit(ipod_exit);
 
 MODULE_AUTHOR("Andrew Onyshchuk");
+MODULE_DESCRIPTION("iPod USB gadget (Apple VID, iPod USB configuration)");
 MODULE_LICENSE("GPL");

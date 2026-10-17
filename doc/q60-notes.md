@@ -26,18 +26,47 @@ Either fault alone breaks the message: the client's decoder (`hid.Decoder` in
 oandrew/ipod) starts a new frame on every `0x02` report, and even a decoder that
 tolerated it could not recover bytes that were never sent.
 
-## What is being tried
+## Test #3: legacy descriptor at full speed — rejected
 
-**Legacy HID mode** (README → *Legacy HID mode*): the gadget offers a real iPod's
-descriptor, whose largest output report (`0x15`) holds 254 bytes, so the 251-byte
-frame fits in one report and the head unit has nothing to split. A real iPod offers
-that descriptor at high speed; the gadget stays at full speed, so whether the X9U6
-takes it there is part of what the test answers.
+`legacy_hid=1` offers a real iPod's descriptor, whose largest output report (`0x15`)
+holds 254 bytes, so the 251-byte frame would fit in one report. At full speed the
+X9U6 does not accept it: it reads the HID report descriptor (control request
+`81 06`, wValue `0x2200`), suspends and disconnects about 6 ms later, retries once,
+then shows "Check USB memory or iPod". No SET_REPORT at all, empty trace. With the
+default full speed descriptor it starts IDPS less than a second after the same read.
+
+So: **full speed + `legacy_hid=1` is rejected by the Clarion X9U6.**
+
+## Next: high speed with the legacy descriptor
+
+A real iPod sends that descriptor at **high speed**, and the X9U6 presumably expects
+the two together. That was also upstream's setup until 2020 (`max_speed` HIGH with
+the 208-byte descriptor). Upstream then moved to the full speed descriptor (5986675,
+which fixed hangs after `GetDevAuthenticationInfo` on some devices) and in 2025 forced
+full speed (fda808e), because a Ford Sync 2 enumerated the gadget at high speed and
+used the real iPod's report layout regardless of the descriptor it was given
+(oandrew/ipod-gadget#28; the client's `--legacy` made it work). Nothing upstream points
+at audio or the USB controller failing at high speed.
+
+The combination to test:
+
+```
+# /etc/modprobe.d/ipod-gadget.conf
+options g_ipod_gadget high_speed=1
+options g_ipod_hid legacy_hid=1
+
+# /etc/default/ipod-client
+IPOD_GLOBAL_ARGS="--legacy"
+```
+
+and confirm the head unit really connected at high speed:
+`cat /sys/class/udc/1000480000.usb/current_speed` → `high-speed`.
 
 Not done (would belong in the client): treating `0x02` on a middle report as a
 continuation. It would not bring back the dropped bytes.
 
 ## Status
 
-- 2026-10-17: legacy mode added (`legacy_hid=1` + client `--legacy`); not yet tried
-  in the car.
+- 2026-10-17: legacy mode added (`legacy_hid=1` + client `--legacy`).
+- Test #3 (`legacy_hid=1`, full speed): rejected, see above.
+- 2026-10-17: `high_speed=1` added; high speed + legacy not yet tried in the car.

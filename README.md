@@ -85,17 +85,25 @@ Given the client binary, it installs it as `/usr/local/bin/ipod` with the `ipod-
 Each run's trace is kept in `/var/lib/ipod` (`ipod.trace` is the current one; older ones are renamed by date
 and never overwritten): attach the one from the failing run when reporting a head unit problem.
 
-### Legacy HID mode (large reports)
+### Legacy HID mode and high speed
 
-By default the gadget offers a full speed HID descriptor whose largest report carries 62 bytes of iAP data,
-so a longer message is split over several reports. Some head units get that splitting wrong
-(see [doc/q60-notes.md](doc/q60-notes.md)). Legacy mode offers a real iPod's descriptor instead
-(reports of up to 255 bytes from the head unit and 767 to it) while staying at full speed.
+By default the gadget runs at full speed with a full speed HID descriptor whose largest report carries
+62 bytes of iAP data, so a longer message is split over several reports. Some head units get that
+splitting wrong (see [doc/q60-notes.md](doc/q60-notes.md)). A real iPod runs at **high speed** with a
+different descriptor (reports of up to 255 bytes from the head unit and 767 to it). Two switches get
+closer to that:
 
-It needs **both** of these, or the client sends report ids the head unit doesn't expect:
+- `legacy_hid=1` (`g_ipod_hid`) offers the real iPod's descriptor. The client must then run with `--legacy`,
+  or it sends report ids the head unit doesn't expect.
+- `high_speed=1` (`g_ipod_gadget`) lets the gadget enumerate at high speed (480M) if the head unit does.
+  Upstream made full speed the only option (fda808e) because some head units pick the report layout from the
+  connection speed and ignore the descriptor, so at high speed you will normally want `legacy_hid=1` too.
+
+The real iPod combination, all three settings:
 
 ```
 # /etc/modprobe.d/ipod-gadget.conf
+options g_ipod_gadget high_speed=1
 options g_ipod_hid legacy_hid=1
 
 # /etc/default/ipod-client
@@ -103,7 +111,12 @@ IPOD_GLOBAL_ARGS="--legacy"
 ```
 
 then `sudo reboot` (or reload the modules and `sudo systemctl restart ipod-client`).
-`dmesg | grep "HID descriptor"` says which one is in use.
+`dmesg | grep -e "HID descriptor" -e "max speed"` shows what the gadget offers;
+`cat /sys/class/udc/*/current_speed` shows what the head unit actually connected at
+(`high-speed` / `full-speed`; on a Pi 5 the controller is `1000480000.usb`).
+
+Known for one car: the 2014 Infiniti Q60's Clarion X9U6 rejects `legacy_hid=1` at full speed
+(it disconnects right after reading the descriptor).
 
 The modules build against the Pi 5 kernels of Raspberry Pi OS Bookworm (6.12) and Trixie (6.18),
 including the default 16K-page `rpi-2712` kernel. To cross compile for a Pi 5 instead,

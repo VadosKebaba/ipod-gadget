@@ -2,3 +2,5 @@
 *.sh text eol=lf
 *.service text eol=lf
 dkms.conf text eol=lf
+# traces are read line by line by the ipod client (ipod view / replay)
+*.trace text eol=lf

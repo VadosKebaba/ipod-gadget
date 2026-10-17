@@ -67,18 +67,28 @@ sudo reboot
 
 It ends with `installed /usr/local/bin/ipod, ipod-client.service starts at boot`.
 
-## 5. Choose the HID descriptor (only if the default fails)
+## 5. Only if the head unit fails: client and descriptor options
 
-The default needs nothing. If your head unit fails with it, see *HID descriptor and speed*
-in the [README](../README.md): the kernel option and the client flag always change
-together. For example `bigout`, the one being tested on a 2014 Infiniti Q60
-([q60-notes.md](q60-notes.md)):
+The defaults need nothing. If authentication stops because the head unit's certificate
+or signature packets arrive damaged (the trace shows them failing their checksum, as on
+a 2014 Infiniti Q60, [q60-notes.md](q60-notes.md)), let the client accept them:
+
+```bash
+sudo sed -i 's/^IPOD_GLOBAL_ARGS=.*/IPOD_GLOBAL_ARGS="--lenient-auth"/' /etc/default/ipod-client
+sudo systemctl restart ipod-client
+```
+
+The other options change the HID descriptor (*HID descriptor and speed* in the
+[README](../README.md)); there the kernel option and the client flag always change
+together. For example `bigout` (which the Q60's head unit rejects):
 
 ```bash
 echo 'options g_ipod_hid hid_desc=bigout' | sudo tee -a /etc/modprobe.d/ipod-gadget.conf
 sudo sed -i 's/^IPOD_GLOBAL_ARGS=.*/IPOD_GLOBAL_ARGS="--hid=bigout"/' /etc/default/ipod-client
 sudo reboot
 ```
+
+Several client options go in the same line, e.g. `IPOD_GLOBAL_ARGS="--hid=bigout --lenient-auth"`.
 
 ## 6. Check at the desk
 

@@ -129,8 +129,17 @@ then `sudo reboot` (or reload the modules and `sudo systemctl restart ipod-clien
 `cat /sys/class/udc/*/current_speed` shows what the head unit actually connected at
 (`high-speed` / `full-speed`; on a Pi 5 the controller is `1000480000.usb`).
 
-Known for one car: the 2014 Infiniti Q60's Clarion X9U6 rejects `legacy` at full and at high speed
-(it disconnects right after reading the descriptor); `bigout` is the next test.
+Known for one car: the 2014 Infiniti Q60's Clarion X9U6 accepts only `default` at full speed; it
+rejects `legacy` (at full and at high speed) and `bigout`, disconnecting right after it reads the descriptor.
+
+### Damaged authentication packets: `--lenient-auth`
+
+Some head units damage their certificate (`RetDevAuthenticationInfo`) or signature
+(`RetDevAuthenticationSignature`) packets when they split them over HID reports, so they fail their checksum
+and authentication stops. The client never verifies the certificate or signature anyway, so
+`IPOD_GLOBAL_ARGS="--lenient-auth"` in `/etc/default/ipod-client` makes it accept those two packets when they are
+short or fail their checksum (logged as `lenient: accepted damaged frame ...`). Every other packet stays strict.
+Needs the VadosKebaba/ipod client; works with any descriptor. See [doc/q60-notes.md](doc/q60-notes.md).
 
 The modules build against the Pi 5 kernels of Raspberry Pi OS Bookworm (6.12) and Trixie (6.18),
 including the default 16K-page `rpi-2712` kernel. To cross compile for a Pi 5 instead,

@@ -121,6 +121,7 @@ if [ -n "$client" ]; then
 #   IPOD_GLOBAL_ARGS="--hid=bigout"   with   options g_ipod_hid hid_desc=bigout
 #   IPOD_GLOBAL_ARGS="--hid=legacy"   with   options g_ipod_hid hid_desc=legacy
 # (--hid needs the VadosKebaba/ipod client; --legacy is the older spelling of --hid=legacy)
+# --lenient-auth accepts damaged certificate/signature packets from the head unit (any descriptor)
 IPOD_GLOBAL_ARGS=""
 EOF
 	fi

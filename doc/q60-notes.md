@@ -90,15 +90,63 @@ options g_ipod_hid hid_desc=bigout
 IPOD_GLOBAL_ARGS="--hid=bigout"
 ```
 
-Possible outcomes: rejected like #3/#4 (the hypothesis is wrong, or it objects to
-something else in an unexpected report); accepted but still split over `0x09`
-(it does not pick by size after all); or one `0x0A` report and authentication goes
-through.
+**Result: rejected exactly like #3 and #4** — descriptor read, suspend about 6 ms
+later, retry, "Check USB memory or iPod". So the 2-byte items were not the reason.
+
+## Conclusion: the X9U6 takes the default descriptor and nothing else
+
+Three different changes (the real iPod's descriptor at full speed, the same at high
+speed, the default plus one report) were all rejected the same way, right after the
+descriptor read, while the default always starts IDPS. The head unit evidently checks
+for the exact default full speed descriptor. **The descriptor experiments are over:
+keep `hid_desc=default`** (no `options g_ipod_hid` line, no `high_speed`).
+
+## Test #6: tolerate the damage in the client (`--lenient-auth`)
+
+We are the iPod, and the client never verifies the accessory's certificate or
+signature: it collects the certificate sections, acknowledges them, and answers the
+signature with "passed". What it acts on (lingo `0x00`, command `0x15` or `0x18`,
+transaction, version, `CertCurrentSection`/`CertMaxSection`) is all in the first HID
+report, which the head unit never damages; the 2-byte losses only hit certificate and
+signature data.
+
+`ipod --lenient-auth` (VadosKebaba/ipod, pi5-support) therefore accepts
+`RetDevAuthenticationInfo` (`0x15`) and `RetDevAuthenticationSignature` (`0x18`)
+packets that arrive short (padded with zeros to their declared length) or with a bad
+checksum, and logs each one:
+`lenient: accepted damaged frame cmd=0x15 got=248 want=251 chk=bad`. Every other
+command stays strict, so it never acts on a damaged packet of any other kind.
+
+Replaying the car's trace with it, the client acknowledges section 0 (`ACK` for
+`0x15`, transaction `0x0001`), which is where the real session stopped. A synthetic
+session damaged the same way (four sections, then a damaged three-report signature)
+runs through to `AckDevAuthenticationStatus` passed. Expect one `ERRO` line when the
+last section arrives: the client tries to read the (damaged) certificate for its log.
+
+Two packet-layer bugs fixed along the way, flag or not: a truncated packet was
+completed from stale bytes of the buffer behind it (and could crash the client), and
+after a bad packet the reader searched inside it for the next start byte (`0x55`,
+which a certificate contains), so it could act on bytes nobody sent as a command.
+
+Config for car test #6:
+
+```
+# /etc/modprobe.d/ipod-gadget.conf: no "options g_ipod_hid" line, no high_speed
+
+# /etc/default/ipod-client
+IPOD_GLOBAL_ARGS="--lenient-auth"
+```
+
+What to look for: four `lenient: accepted damaged frame cmd=0x15` lines and one with
+`cmd=0x18` in `journalctl -u ipod-client`, then the head unit going past
+authentication (in the trace: `AckDevAuthenticationStatus` sent, then the audio and
+remote lingo traffic).
 
 ## Status
 
 - 2026-10-17: `legacy_hid=1` added. Test #3 (legacy, full speed): rejected.
 - 2026-10-17: `high_speed=1` added. Test #4 (legacy, high speed): rejected.
-- 2026-10-17: `hid_desc=bigout` + client `--hid=bigout` added; the client tolerates
-  `0x02` mid-frame. Test #5 not run yet.
+- 2026-10-17: `hid_desc=bigout` + client `--hid=bigout`; the client tolerates `0x02`
+  mid-frame. Test #5 (bigout, full speed): rejected. Descriptor stays default.
+- 2026-10-17: client `--lenient-auth`, packet layer fixes. Test #6 not run yet.
 

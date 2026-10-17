@@ -6,14 +6,15 @@
 #   - puts the USB controller in device mode: dtoverlay=dwc2,dr_mode=peripheral
 #     (on the Pi 5 that is the USB-C port)
 #   - loads the gadget at boot
-#   - optionally installs the iAP client (https://github.com/oandrew/ipod, built for
-#     linux/arm64) as a service that starts at boot: pass the binary as the argument
-# Usage: sudo ./install-rpi.sh [path/to/ipod]   then reboot.
+#   - optionally installs the iAP client (https://github.com/VadosKebaba/ipod, branch
+#     pi5-support, or oandrew/ipod) as a service that starts at boot: pass a linux/arm64
+#     binary, or a checkout of the client to build it here (needs Go: apt install golang-go)
+# Usage: sudo ./install-rpi.sh [path/to/ipod | path/to/client-checkout]   then reboot.
 set -euo pipefail
 
 client=
 if [ $# -gt 0 ]; then
-	[ -f "$1" ] || { echo "no such file: $1" >&2; exit 1; }
+	[ -e "$1" ] || { echo "no such file or directory: $1" >&2; exit 1; }
 	client=$(readlink -f "$1")
 fi
 cd "$(dirname "$(readlink -f "$0")")"
@@ -80,28 +81,46 @@ if [ ! -f /etc/modprobe.d/ipod-gadget.conf ]; then
 #options g_ipod_gadget swap_configs=1
 #options g_ipod_gadget only_ipod=1
 #options g_ipod_gadget product_id=0x1297
-# Legacy HID descriptor (large reports); also needs IPOD_GLOBAL_ARGS="--legacy" in /etc/default/ipod-client:
-#options g_ipod_hid legacy_hid=1
-# High speed like a real iPod (default: full speed only); usually together with legacy_hid=1:
+# HID descriptor: default, legacy (a real iPod's) or bigout (default + a 255-byte output report);
+# needs the matching IPOD_GLOBAL_ARGS="--hid=..." in /etc/default/ipod-client:
+#options g_ipod_hid hid_desc=bigout
+# High speed like a real iPod (default: full speed only):
 #options g_ipod_gadget high_speed=1
 EOF
 fi
 
 echo "== iAP client"
+built=
+if [ -n "$client" ] && [ -d "$client" ]; then
+	# a checkout of the client: build it as the user who ran sudo (their Go caches,
+	# nothing root-owned left behind), into a temporary directory
+	command -v go > /dev/null || { echo "building $client needs Go: sudo apt install golang-go" >&2; exit 1; }
+	builder=${SUDO_USER:-root}
+	built=$(sudo -u "$builder" mktemp -d)
+	echo "building the client in $client as $builder"
+	(cd "$client" && sudo -H -u "$builder" env CGO_ENABLED=0 go build -o "$built/ipod" ./cmd/ipod)
+	client="$built/ipod"
+fi
 if [ -n "$client" ]; then
 	# also catches a binary built for the wrong architecture
 	if ! "$client" lingos > /dev/null 2>&1; then
 		echo "$client doesn't run here: build it with GOOS=linux GOARCH=arm64" >&2
 		exit 1
 	fi
-	install -m 755 "$client" /usr/local/bin/ipod
+	# given the installed binary itself, keep it (install refuses to copy a file onto itself)
+	if [ "$client" != /usr/local/bin/ipod ]; then
+		install -m 755 "$client" /usr/local/bin/ipod
+	fi
+	[ -z "$built" ] || rm -rf "$built"
 	install -m 644 ipod-client.service /etc/systemd/system/ipod-client.service
 	if [ ! -f /etc/default/ipod-client ]; then
 		cat > /etc/default/ipod-client <<'EOF'
 # Global options for the ipod client (ipod-client.service), placed before "serve".
-# Legacy HID mode needs BOTH sides, or the client sends report ids the host doesn't expect:
-#   here:                              IPOD_GLOBAL_ARGS="--legacy"
-#   /etc/modprobe.d/ipod-gadget.conf:  options g_ipod_hid legacy_hid=1
+# --hid has to match the HID descriptor the kernel offers, or the client sends report ids
+# the head unit doesn't expect (kernel side: /etc/modprobe.d/ipod-gadget.conf):
+#   IPOD_GLOBAL_ARGS="--hid=bigout"   with   options g_ipod_hid hid_desc=bigout
+#   IPOD_GLOBAL_ARGS="--hid=legacy"   with   options g_ipod_hid hid_desc=legacy
+# (--hid needs the VadosKebaba/ipod client; --legacy is the older spelling of --hid=legacy)
 IPOD_GLOBAL_ARGS=""
 EOF
 	fi
@@ -110,7 +129,7 @@ EOF
 	systemctl try-restart ipod-client.service
 	echo "installed /usr/local/bin/ipod, ipod-client.service starts at boot"
 else
-	echo "skipped: pass the client binary to install it, e.g. sudo ./install-rpi.sh ./ipod"
+	echo "skipped: pass the client binary or a checkout of it, e.g. sudo ./install-rpi.sh ~/ipod"
 fi
 
 cat <<EOF

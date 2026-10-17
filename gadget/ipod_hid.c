@@ -24,15 +24,71 @@
 #include "ipod.h"
 //#include "ipod_hid.h"
 
-// Largest record either fifo holds, i.e. one report including its id. The legacy
-// descriptor's biggest are 767 + 1 bytes in (report 0x0C) and 255 + 1 out (0x15).
+// Largest record either fifo holds, i.e. one report including its id. The biggest
+// reports are 767 + 1 bytes in (legacy 0x0C) and 255 + 1 out (legacy 0x15, bigout 0x0A).
 #define REPORT_LENGTH 1024
 
 struct class *ipod_hid_class;
 
+// Which HID report descriptor to offer, hid_desc=...
+//   default  the full speed descriptor (ipod.h): output reports up to 63 bytes
+//   legacy   a real iPod's: input reports up to 767 bytes, output up to 255, which
+//            takes 2-byte Report Count items (0x96)
+//   bigout   default plus one 255-byte Output report 0x0A, 1-byte items only
+// The ipod client has to use the same layout (--hid=default|legacy|bigout).
+enum { HID_DESC_DEFAULT, HID_DESC_LEGACY, HID_DESC_BIGOUT };
+static const char * const hid_desc_names[] = {
+	[HID_DESC_DEFAULT] = "default",
+	[HID_DESC_LEGACY] = "legacy",
+	[HID_DESC_BIGOUT] = "bigout",
+};
+static int hid_desc = -1;	// not given: default, or legacy with legacy_hid=1
+
 static bool legacy_hid = false;
 module_param(legacy_hid, bool, 0444);
-MODULE_PARM_DESC(legacy_hid, "offer legacy HID report descriptor with large reports (use with ipod client --legacy)");
+MODULE_PARM_DESC(legacy_hid, "same as hid_desc=legacy (kept for existing configs)");
+
+static int hid_desc_choice(void)
+{
+	if (hid_desc >= 0)
+		return hid_desc;
+	return legacy_hid ? HID_DESC_LEGACY : HID_DESC_DEFAULT;
+}
+
+// refuses anything else, so a typo fails modprobe instead of silently offering the default
+static int hid_desc_set(const char *val, const struct kernel_param *kp)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(hid_desc_names); i++) {
+		if (sysfs_streq(val, hid_desc_names[i])) {
+			*(int *)kp->arg = i;
+			return 0;
+		}
+	}
+	pr_err("hid_desc=%s: expected default, legacy or bigout\n", val);
+	return -EINVAL;
+}
+
+static int hid_desc_get(char *buffer, const struct kernel_param *kp)
+{
+	return scnprintf(buffer, PAGE_SIZE, "%s\n", hid_desc_names[hid_desc_choice()]);
+}
+
+static const struct kernel_param_ops hid_desc_ops = {
+	.set = hid_desc_set,
+	.get = hid_desc_get,
+};
+module_param_cb(hid_desc, &hid_desc_ops, &hid_desc, 0444);
+MODULE_PARM_DESC(hid_desc, "HID report descriptor: default, legacy or bigout (ipod client --hid= must match)");
+
+// bigout: the default descriptor byte for byte up to its End Collection, then this Output
+// report (Usage 1, Report ID 0x0A, Report Count 255 as a 1-byte item) and End Collection.
+// Assembled in ipod_hid_mod_init().
+static const unsigned char hid_bigout_tail[] = {
+	0x09, 0x01, 0x85, 0x0a, 0x95, 0xff, 0x92, 0x02, 0x01, 0xc0
+};
+static unsigned char ipod_hid_report_bigout[sizeof(ipod_hid_report) - 1 + sizeof(hid_bigout_tail)];
 
 struct ipod_hid
 {
@@ -434,6 +490,7 @@ static int ipod_hid_bind(struct usb_configuration *conf, struct usb_function *fu
 {
 	struct ipod_hid *hid = func_to_ipod_hid(func);
 	int ret = 0;
+	int desc;
 
 	usb_function_deactivate(func);
 
@@ -449,16 +506,26 @@ static int ipod_hid_bind(struct usb_configuration *conf, struct usb_function *fu
 		return -ENODEV;
 	}
 
-	if (legacy_hid) {
+	desc = hid_desc_choice();
+	if (legacy_hid && desc != HID_DESC_LEGACY) {
+		pr_warn("legacy_hid=1 ignored: hid_desc=%s\n", hid_desc_names[desc]);
+	}
+	switch (desc) {
+	case HID_DESC_LEGACY:
 		hid->report_desc = ipod_hid_report_legacy;
 		hid->report_desc_len = sizeof(ipod_hid_report_legacy);
-	} else {
+		break;
+	case HID_DESC_BIGOUT:
+		hid->report_desc = ipod_hid_report_bigout;
+		hid->report_desc_len = sizeof(ipod_hid_report_bigout);
+		break;
+	default:
 		hid->report_desc = ipod_hid_report;
 		hid->report_desc_len = sizeof(ipod_hid_report);
 	}
 	// before usb_assign_descriptors(), which copies the descriptors
 	ipod_hid_desc2.wReportDescriptorLength = cpu_to_le16(hid->report_desc_len);
-	pr_info("using %s HID descriptor\n", legacy_hid ? "legacy" : "full-speed");
+	pr_info("using %s HID descriptor\n", hid_desc_names[desc]);
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 	ret = usb_assign_descriptors(func, ipod_hid_desc_fs_hs, ipod_hid_desc_fs_hs, NULL, NULL);
@@ -651,6 +718,11 @@ DECLARE_USB_FUNCTION(ipod_hid, ipod_hid_alloc_inst, ipod_hid_alloc);
 
 static int __init ipod_hid_mod_init(void)
 {
+	// the default descriptor without its final End Collection (0xc0), then the tail
+	memcpy(ipod_hid_report_bigout, ipod_hid_report, sizeof(ipod_hid_report) - 1);
+	memcpy(ipod_hid_report_bigout + sizeof(ipod_hid_report) - 1, hid_bigout_tail,
+	       sizeof(hid_bigout_tail));
+
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
 	ipod_hid_class = class_create("iap");
 	#else

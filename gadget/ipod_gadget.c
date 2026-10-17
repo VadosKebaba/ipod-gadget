@@ -27,6 +27,13 @@ static ushort product_id = 0;
 module_param(product_id, ushort, 0);
 MODULE_PARM_DESC(product_id, "Override USB Product ID");
 
+// Full speed only by default (upstream fda808e): some docks pick the HID report layout
+// from the connection speed and ignore the descriptor, and the default descriptor is
+// the full speed one. A real iPod runs at high speed with the legacy descriptor.
+static bool high_speed = false;
+module_param(high_speed, bool, 0444);
+MODULE_PARM_DESC(high_speed, "allow high speed (480M) like a real iPod; usually wants g_ipod_hid legacy_hid=1");
+
 static struct usb_function_instance *fi_ms;
 static struct usb_function *f_ms;
 
@@ -125,6 +132,7 @@ static int ipod_bind(struct usb_composite_dev *cdev)
 {
 	int ret = 0;
 	DBG(cdev, " = %s() \n", __FUNCTION__);
+	INFO(cdev, "max speed %s\n", high_speed ? "high" : "full");
 
 	fi_ms = usb_get_function_instance("mass_storage");
 	if(IS_ERR(fi_ms)) {
@@ -225,6 +233,10 @@ static int __init ipod_init(void)
 	if(product_id != 0) {
 		device_desc.idProduct = cpu_to_le16(product_id);
 		pr_info("override usb idProduct: %04x\n", product_id);
+	}
+
+	if(high_speed) {
+		ipod_driver.max_speed = USB_SPEED_HIGH;
 	}
 
 	return usb_composite_probe(&ipod_driver);

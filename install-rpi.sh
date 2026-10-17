@@ -82,6 +82,8 @@ if [ ! -f /etc/modprobe.d/ipod-gadget.conf ]; then
 #options g_ipod_gadget product_id=0x1297
 # Legacy HID descriptor (large reports); also needs IPOD_GLOBAL_ARGS="--legacy" in /etc/default/ipod-client:
 #options g_ipod_hid legacy_hid=1
+# High speed like a real iPod (default: full speed only); usually together with legacy_hid=1:
+#options g_ipod_gadget high_speed=1
 EOF
 fi
 

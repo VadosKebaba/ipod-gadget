@@ -137,6 +137,9 @@ static struct usb_endpoint_descriptor ipod_audio_stream_1_endpoint_fs = {
 	.bSynchAddress = 0
 };
 
+// high speed (g_ipod_gadget high_speed=1): bInterval 4 = 2^(4-1) x 125 us = 1 ms, and 192 bytes
+// covers 48 kHz 16-bit stereo per ms; both as a real iPod at high speed
+// (doc/ipod-usb-interface-real.txt)
 static struct usb_endpoint_descriptor ipod_audio_stream_1_endpoint_hs = {
 	.bLength =		USB_DT_ENDPOINT_AUDIO_SIZE,
 	.bDescriptorType =	USB_DT_ENDPOINT  ,
@@ -268,6 +271,8 @@ static struct ipod_hid_class_descriptor ipod_hid_desc2 = {
 
 
 
+// Serves both speeds: bInterval 1 is 1 ms at full speed and 125 us at high speed, which is
+// what a real iPod at high speed declares (doc/ipod-usb-interface-real.txt)
 static struct usb_endpoint_descriptor ipod_hid_endpoint = {
 	.bLength =		USB_DT_ENDPOINT_SIZE,
 	.bDescriptorType =	USB_DT_ENDPOINT  ,

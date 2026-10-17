@@ -22,51 +22,70 @@ Putting the 4 missing bytes back makes the frame's iAP checksum come out right
 (`0x09`), which is what shows the bytes were dropped by the head unit rather than
 misread on our side.
 
-Either fault alone breaks the message: the client's decoder (`hid.Decoder` in
-oandrew/ipod) starts a new frame on every `0x02` report, and even a decoder that
-tolerated it could not recover bytes that were never sent.
+Either fault alone breaks the message. The first one is handled now: the client
+(VadosKebaba/ipod, pi5-support) reads a `0x02` report that arrives mid-frame as a
+continuation. The bytes the head unit never sent can't be recovered, so the way out
+is to give it nothing to split: a descriptor whose output report holds the whole frame.
 
 ## Test #3: legacy descriptor at full speed — rejected
 
-`legacy_hid=1` offers a real iPod's descriptor, whose largest output report (`0x15`)
-holds 254 bytes, so the 251-byte frame would fit in one report. At full speed the
-X9U6 does not accept it: it reads the HID report descriptor (control request
+`hid_desc=legacy` (then `legacy_hid=1`) offers a real iPod's descriptor, whose largest
+output report (`0x15`) holds 254 bytes, so the 251-byte frame would fit in one report.
+The X9U6 does not accept it: it reads the HID report descriptor (control request
 `81 06`, wValue `0x2200`), suspends and disconnects about 6 ms later, retries once,
 then shows "Check USB memory or iPod". No SET_REPORT at all, empty trace. With the
-default full speed descriptor it starts IDPS less than a second after the same read.
+default descriptor it starts IDPS less than a second after the same read.
 
-So: **full speed + `legacy_hid=1` is rejected by the Clarion X9U6.**
+## Test #4: legacy descriptor at high speed — rejected the same way
 
-## Next: high speed with the legacy descriptor
+A real iPod sends that descriptor at high speed, so the next test added
+`high_speed=1`. The head unit did enumerate at high speed (`current_speed` =
+`high-speed`, dmesg "new device is high-speed" twice), so the cable chain carries it,
+and then rejected the descriptor exactly as in test #3.
 
-A real iPod sends that descriptor at **high speed**, and the X9U6 presumably expects
-the two together. That was also upstream's setup until 2020 (`max_speed` HIGH with
-the 208-byte descriptor). Upstream then moved to the full speed descriptor (5986675,
-which fixed hangs after `GetDevAuthenticationInfo` on some devices) and in 2025 forced
-full speed (fda808e), because a Ford Sync 2 enumerated the gadget at high speed and
-used the real iPod's report layout regardless of the descriptor it was given
-(oandrew/ipod-gadget#28; the client's `--legacy` made it work). Nothing upstream points
-at audio or the USB controller failing at high speed.
+So **speed is irrelevant: the X9U6 rejects the legacy descriptor itself.**
 
-The combination to test:
+Background on speed: upstream ran at high speed with the legacy descriptor until 2020,
+moved to the full speed descriptor in 5986675 (fixing hangs after
+`GetDevAuthenticationInfo` on some devices), and forced full speed in fda808e (2025)
+because a Ford Sync 2 at high speed used the real iPod's report layout regardless of
+the descriptor (oandrew/ipod-gadget#28). `high_speed=1` stays available, off by default.
+
+## Hypothesis: 2-byte Report Count items
+
+The legacy descriptor declares its input reports `0x09`–`0x0C` (257 to 767 bytes) with
+2-byte Report Count items (`0x96 xx xx`). The descriptor the X9U6 accepts uses only
+1-byte ones (`0x95 xx`). A minimal HID parser in the head unit that knows only the
+1-byte form would fail on the legacy descriptor right after reading it, which is what
+both tests show. The head unit does read the report sizes: with the default
+descriptor it always picked the smallest output report that fits (`0x06` for short
+frames, `0x09` for long ones).
+
+## Test #5: default + one big output report (`bigout`)
+
+`hid_desc=bigout` is the default descriptor byte for byte plus one Output report
+`0x0A` of 255 bytes, written with a 1-byte Report Count (`0x95 0xff`). No `0x96`
+anywhere. If the hypothesis holds, the head unit accepts it and, choosing the smallest
+report that fits, sends the 251-byte frame as one `0x0A` report. Full speed, so only
+one thing changes from the working default:
 
 ```
-# /etc/modprobe.d/ipod-gadget.conf
-options g_ipod_gadget high_speed=1
-options g_ipod_hid legacy_hid=1
+# /etc/modprobe.d/ipod-gadget.conf   (no high_speed line)
+options g_ipod_hid hid_desc=bigout
 
 # /etc/default/ipod-client
-IPOD_GLOBAL_ARGS="--legacy"
+IPOD_GLOBAL_ARGS="--hid=bigout"
 ```
 
-and confirm the head unit really connected at high speed:
-`cat /sys/class/udc/1000480000.usb/current_speed` → `high-speed`.
-
-Not done (would belong in the client): treating `0x02` on a middle report as a
-continuation. It would not bring back the dropped bytes.
+Possible outcomes: rejected like #3/#4 (the hypothesis is wrong, or it objects to
+something else in an unexpected report); accepted but still split over `0x09`
+(it does not pick by size after all); or one `0x0A` report and authentication goes
+through.
 
 ## Status
 
-- 2026-10-17: legacy mode added (`legacy_hid=1` + client `--legacy`).
-- Test #3 (`legacy_hid=1`, full speed): rejected, see above.
-- 2026-10-17: `high_speed=1` added; high speed + legacy not yet tried in the car.
+- 2026-10-17: `legacy_hid=1` added. Test #3 (legacy, full speed): rejected.
+- 2026-10-17: `high_speed=1` added. Test #4 (legacy, high speed): rejected.
+- 2026-10-17: `hid_desc=bigout` + client `--hid=bigout` added; the client tolerates
+  `0x02` mid-frame. Test #5 not run yet.
+

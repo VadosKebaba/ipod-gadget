@@ -8,7 +8,7 @@ After=systemd-modules-load.service
 StartLimitIntervalSec=0
 
 [Service]
-# IPOD_GLOBAL_ARGS, e.g. "--legacy": must match the kernel side (g_ipod_hid legacy_hid),
+# IPOD_GLOBAL_ARGS, e.g. "--hid=bigout": must match the kernel side (g_ipod_hid hid_desc),
 # see the comments in /etc/default/ipod-client and the README
 EnvironmentFile=-/etc/default/ipod-client
 # Every non-empty trace is kept: it's what to attach when reporting a head unit problem

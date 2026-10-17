@@ -59,55 +59,67 @@ Check the messages from `dmesg` and verify that the device `/dev/iap0` is availa
 
 ## Raspberry Pi (Pi 5, also Zero / Zero 2 / 4) with Raspberry Pi OS
 
-Build the [client app](https://github.com/oandrew/ipod) for the Pi on any machine with Go
-(`GOARCH=arm64` for 64-bit Raspberry Pi OS, which is what a Pi 5 runs) and copy the `ipod` binary to the Pi:
+The [client app](https://github.com/oandrew/ipod) talks iAP to the head unit. Use the fork at
+https://github.com/VadosKebaba/ipod (branch `pi5-support`): it adds `--hid=default|legacy|bigout`, which the
+HID descriptor options below need. Either build it for the Pi on any machine with Go (`GOARCH=arm64` for
+64-bit Raspberry Pi OS, which is what a Pi 5 runs) and copy the `ipod` binary over:
 
 ```
-git clone https://github.com/oandrew/ipod.git
+git clone -b pi5-support https://github.com/VadosKebaba/ipod.git
 cd ipod
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/ipod
 ```
 
+or clone it on the Pi and let the install script build it there (needs Go: `sudo apt install golang-go`).
 Then on the Pi:
 
 ```
-git clone https://github.com/oandrew/ipod-gadget.git
+git clone -b pi5-support https://github.com/VadosKebaba/ipod-gadget.git
 cd ipod-gadget
-sudo bash install-rpi.sh /path/to/ipod
+sudo bash install-rpi.sh /path/to/ipod        # the binary, or the client checkout to build
 sudo reboot
 ```
 
 `install-rpi.sh` installs the kernel headers and DKMS (so the modules get rebuilt after every kernel update),
 enables USB device mode (`dtoverlay=dwc2,dr_mode=peripheral` in `/boot/firmware/config.txt`)
-and loads the modules at boot. Module options (`swap_configs`, `only_ipod`, `product_id`) go in `/etc/modprobe.d/ipod-gadget.conf`.
-Given the client binary, it installs it as `/usr/local/bin/ipod` with the `ipod-client` service, which keeps
-`/dev/iap0` open from boot on (`journalctl -u ipod-client -f` shows the iAP traffic). Run it again with a new binary to update the client.
+and loads the modules at boot. Module options (`swap_configs`, `only_ipod`, `product_id`, `hid_desc`, `high_speed`)
+go in `/etc/modprobe.d/ipod-gadget.conf`, client options in `IPOD_GLOBAL_ARGS` in `/etc/default/ipod-client`.
+Given the client, it installs it as `/usr/local/bin/ipod` with the `ipod-client` service, which keeps
+`/dev/iap0` open from boot on (`journalctl -u ipod-client -f` shows the iAP traffic). Run it again with a new
+binary or an updated checkout to update the client.
 Each run's trace is kept in `/var/lib/ipod` (`ipod.trace` is the current one; older ones are renamed by date
 and never overwritten): attach the one from the failing run when reporting a head unit problem.
 
-### Legacy HID mode and high speed
+### HID descriptor and speed
 
-By default the gadget runs at full speed with a full speed HID descriptor whose largest report carries
-62 bytes of iAP data, so a longer message is split over several reports. Some head units get that
-splitting wrong (see [doc/q60-notes.md](doc/q60-notes.md)). A real iPod runs at **high speed** with a
-different descriptor (reports of up to 255 bytes from the head unit and 767 to it). Two switches get
-closer to that:
+By default the gadget runs at full speed with a full speed HID descriptor whose largest output report
+(head unit to gadget) carries 62 bytes of iAP data, so a longer message is split over several reports.
+Some head units get that splitting wrong (see [doc/q60-notes.md](doc/q60-notes.md)). `g_ipod_hid hid_desc=`
+picks the descriptor, and the client's `--hid=` has to name the same one, or it sends report ids the head unit
+doesn't expect:
 
-- `legacy_hid=1` (`g_ipod_hid`) offers the real iPod's descriptor. The client must then run with `--legacy`,
-  or it sends report ids the head unit doesn't expect.
-- `high_speed=1` (`g_ipod_gadget`) lets the gadget enumerate at high speed (480M) if the head unit does.
-  Upstream made full speed the only option (fda808e) because some head units pick the report layout from the
-  connection speed and ignore the descriptor, so at high speed you will normally want `legacy_hid=1` too.
+| `hid_desc=` (`g_ipod_hid`) | client | descriptor |
+|---|---|---|
+| `default` | `--hid=default` (or nothing) | full speed iPod descriptor, output reports up to 63 bytes |
+| `legacy` | `--hid=legacy` | a real iPod's at high speed: output up to 255 bytes, input up to 767 (2-byte Report Count items) |
+| `bigout` | `--hid=bigout` | `default` plus one 255-byte output report `0x0A` (1-byte items only) |
 
-The real iPod combination, all three settings:
+`legacy_hid=1` and the client's `--legacy` are the older spellings of `legacy`. A value `g_ipod_hid` doesn't
+know makes `modprobe` fail rather than fall back silently.
+
+`g_ipod_gadget high_speed=1` lets the gadget enumerate at high speed (480M) like a real iPod, if the head unit
+does; full speed stays the default. Upstream made full speed the only option (fda808e) because some head units
+pick the report layout from the connection speed and ignore the descriptor, so at high speed you will
+normally want `legacy`.
+
+For example, `bigout`:
 
 ```
 # /etc/modprobe.d/ipod-gadget.conf
-options g_ipod_gadget high_speed=1
-options g_ipod_hid legacy_hid=1
+options g_ipod_hid hid_desc=bigout
 
 # /etc/default/ipod-client
-IPOD_GLOBAL_ARGS="--legacy"
+IPOD_GLOBAL_ARGS="--hid=bigout"
 ```
 
 then `sudo reboot` (or reload the modules and `sudo systemctl restart ipod-client`).
@@ -115,8 +127,8 @@ then `sudo reboot` (or reload the modules and `sudo systemctl restart ipod-clien
 `cat /sys/class/udc/*/current_speed` shows what the head unit actually connected at
 (`high-speed` / `full-speed`; on a Pi 5 the controller is `1000480000.usb`).
 
-Known for one car: the 2014 Infiniti Q60's Clarion X9U6 rejects `legacy_hid=1` at full speed
-(it disconnects right after reading the descriptor).
+Known for one car: the 2014 Infiniti Q60's Clarion X9U6 rejects `legacy` at full and at high speed
+(it disconnects right after reading the descriptor); `bigout` is the next test.
 
 The modules build against the Pi 5 kernels of Raspberry Pi OS Bookworm (6.12) and Trixie (6.18),
 including the default 16K-page `rpi-2712` kernel. To cross compile for a Pi 5 instead,

@@ -80,6 +80,8 @@ if [ ! -f /etc/modprobe.d/ipod-gadget.conf ]; then
 #options g_ipod_gadget swap_configs=1
 #options g_ipod_gadget only_ipod=1
 #options g_ipod_gadget product_id=0x1297
+# Legacy HID descriptor (large reports); also needs IPOD_GLOBAL_ARGS="--legacy" in /etc/default/ipod-client:
+#options g_ipod_hid legacy_hid=1
 EOF
 fi
 
@@ -92,6 +94,15 @@ if [ -n "$client" ]; then
 	fi
 	install -m 755 "$client" /usr/local/bin/ipod
 	install -m 644 ipod-client.service /etc/systemd/system/ipod-client.service
+	if [ ! -f /etc/default/ipod-client ]; then
+		cat > /etc/default/ipod-client <<'EOF'
+# Global options for the ipod client (ipod-client.service), placed before "serve".
+# Legacy HID mode needs BOTH sides, or the client sends report ids the host doesn't expect:
+#   here:                              IPOD_GLOBAL_ARGS="--legacy"
+#   /etc/modprobe.d/ipod-gadget.conf:  options g_ipod_hid legacy_hid=1
+IPOD_GLOBAL_ARGS=""
+EOF
+	fi
 	systemctl daemon-reload
 	systemctl enable ipod-client.service
 	systemctl try-restart ipod-client.service

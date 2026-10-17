@@ -8,12 +8,16 @@ After=systemd-modules-load.service
 StartLimitIntervalSec=0
 
 [Service]
-# -d puts the iAP traffic in the journal; the trace file is what to attach when
-# reporting a head unit problem upstream (view it with: ipod view <file>)
-# the client doesn't truncate the trace, so start each run on a fresh file and keep
-# the previous run (the one to look at after a crash or a dropped connection)
-ExecStartPre=-/bin/mv -f /var/lib/ipod/ipod.trace /var/lib/ipod/ipod.trace.prev
-ExecStart=/usr/local/bin/ipod -d serve -w /var/lib/ipod/ipod.trace /dev/iap0
+# IPOD_GLOBAL_ARGS, e.g. "--legacy": must match the kernel side (g_ipod_hid legacy_hid),
+# see the comments in /etc/default/ipod-client and the README
+EnvironmentFile=-/etc/default/ipod-client
+# Every non-empty trace is kept: it's what to attach when reporting a head unit problem
+# (view one with: ipod view <file>). The client doesn't truncate its trace, so each run
+# starts on a fresh file. Named by date, plus a counter when that name is taken: a Pi
+# without an RTC battery boots to the same 1970 time every time, so dates repeat.
+ExecStartPre=-/bin/sh -c 'f=/var/lib/ipod/ipod.trace; [ -s "$$f" ] || exit 0; t=/var/lib/ipod/ipod-$$(date +%%Y%%m%%d-%%H%%M%%S); n=$$t.trace; i=1; while [ -e "$$n" ]; do n=$$t-$$i.trace; i=$$((i+1)); done; mv "$$f" "$$n"'
+# -d puts the iAP traffic in the journal; global flags have to come before "serve"
+ExecStart=/usr/local/bin/ipod -d $IPOD_GLOBAL_ARGS serve -w /var/lib/ipod/ipod.trace /dev/iap0
 StateDirectory=ipod
 Restart=always
 RestartSec=2

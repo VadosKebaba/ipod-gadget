@@ -82,6 +82,28 @@ enables USB device mode (`dtoverlay=dwc2,dr_mode=peripheral` in `/boot/firmware/
 and loads the modules at boot. Module options (`swap_configs`, `only_ipod`, `product_id`) go in `/etc/modprobe.d/ipod-gadget.conf`.
 Given the client binary, it installs it as `/usr/local/bin/ipod` with the `ipod-client` service, which keeps
 `/dev/iap0` open from boot on (`journalctl -u ipod-client -f` shows the iAP traffic). Run it again with a new binary to update the client.
+Each run's trace is kept in `/var/lib/ipod` (`ipod.trace` is the current one; older ones are renamed by date
+and never overwritten): attach the one from the failing run when reporting a head unit problem.
+
+### Legacy HID mode (large reports)
+
+By default the gadget offers a full speed HID descriptor whose largest report carries 62 bytes of iAP data,
+so a longer message is split over several reports. Some head units get that splitting wrong
+(see [doc/q60-notes.md](doc/q60-notes.md)). Legacy mode offers a real iPod's descriptor instead
+(reports of up to 255 bytes from the head unit and 767 to it) while staying at full speed.
+
+It needs **both** of these, or the client sends report ids the head unit doesn't expect:
+
+```
+# /etc/modprobe.d/ipod-gadget.conf
+options g_ipod_hid legacy_hid=1
+
+# /etc/default/ipod-client
+IPOD_GLOBAL_ARGS="--legacy"
+```
+
+then `sudo reboot` (or reload the modules and `sudo systemctl restart ipod-client`).
+`dmesg | grep "HID descriptor"` says which one is in use.
 
 The modules build against the Pi 5 kernels of Raspberry Pi OS Bookworm (6.12) and Trixie (6.18),
 including the default 16K-page `rpi-2712` kernel. To cross compile for a Pi 5 instead,

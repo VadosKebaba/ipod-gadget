@@ -24,9 +24,15 @@
 #include "ipod.h"
 //#include "ipod_hid.h"
 
+// Largest record either fifo holds, i.e. one report including its id. The legacy
+// descriptor's biggest are 767 + 1 bytes in (report 0x0C) and 255 + 1 out (0x15).
 #define REPORT_LENGTH 1024
 
 struct class *ipod_hid_class;
+
+static bool legacy_hid = false;
+module_param(legacy_hid, bool, 0444);
+MODULE_PARM_DESC(legacy_hid, "offer legacy HID report descriptor with large reports (use with ipod client --legacy)");
 
 struct ipod_hid
 {
@@ -39,6 +45,10 @@ struct ipod_hid
 
 	int intf;
 	struct usb_ep *in_ep;
+
+	// report descriptor offered to the host, picked at bind from legacy_hid
+	const unsigned char *report_desc;
+	size_t report_desc_len;
 
 	//char device
 	// dev_t dev_id;
@@ -336,7 +346,8 @@ static int ipod_hid_setup(struct usb_function *func, const struct usb_ctrlreques
 	{
 	case USB_REQ_GET_DESCRIPTOR:
 		VDBG(cdev, "get hid descriptor\n");
-		memcpy(req->buf, ipod_hid_report, sizeof(ipod_hid_report));
+		length = min_t(int, w_length, hid->report_desc_len);
+		memcpy(req->buf, hid->report_desc, length);
 		goto respond;
 		break;
 	case HID_REQ_GET_REPORT:
@@ -365,7 +376,8 @@ static int ipod_hid_setup(struct usb_function *func, const struct usb_ctrlreques
 	return -EOPNOTSUPP;
 
 respond:
-	req->zero = 0;
+	// only a descriptor shorter than requested ends early: zero-length packet if needed
+	req->zero = length < w_length;
 	req->length = length;
 	status = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
 	if (status < 0)
@@ -436,6 +448,17 @@ static int ipod_hid_bind(struct usb_configuration *conf, struct usb_function *fu
 		ERROR(conf->cdev, "usb_ep_autoconfig FAILED\n");
 		return -ENODEV;
 	}
+
+	if (legacy_hid) {
+		hid->report_desc = ipod_hid_report_legacy;
+		hid->report_desc_len = sizeof(ipod_hid_report_legacy);
+	} else {
+		hid->report_desc = ipod_hid_report;
+		hid->report_desc_len = sizeof(ipod_hid_report);
+	}
+	// before usb_assign_descriptors(), which copies the descriptors
+	ipod_hid_desc2.wReportDescriptorLength = cpu_to_le16(hid->report_desc_len);
+	pr_info("using %s HID descriptor\n", legacy_hid ? "legacy" : "full-speed");
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 	ret = usb_assign_descriptors(func, ipod_hid_desc_fs_hs, ipod_hid_desc_fs_hs, NULL, NULL);

@@ -59,6 +59,8 @@ Check the messages from `dmesg` and verify that the device `/dev/iap0` is availa
 
 ## Raspberry Pi (Pi 5, also Zero / Zero 2 / 4) with Raspberry Pi OS
 
+Step by step for a Pi 5, including reinstalling over an old setup: [doc/pi5-install.md](doc/pi5-install.md).
+
 The [client app](https://github.com/oandrew/ipod) talks iAP to the head unit. Use the fork at
 https://github.com/VadosKebaba/ipod (branch `pi5-support`): it adds `--hid=default|legacy|bigout`, which the
 HID descriptor options below need. Either build it for the Pi on any machine with Go (`GOARCH=arm64` for

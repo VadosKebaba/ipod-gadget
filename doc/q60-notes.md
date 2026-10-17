@@ -20,12 +20,25 @@ It splits the frame wrongly in two ways:
 
 Putting the 4 missing bytes back makes the frame's iAP checksum come out right
 (`0x09`), which is what shows the bytes were dropped by the head unit rather than
-misread on our side.
+misread on our side. The frame carries the head unit's certificate (DER), which
+shows exactly where they went: the boundary after the first report is intact
+(`30 82 02 | 41 A0 03 02 01 02`), and `13 0A` is missing after the second report
+(`06 03 55 04 0A | 13 0A | "Apple Inc."`) and `41 70` ("Ap") after the third
+(`13 2E | 41 70 | "ple iPod Accessories ..."`). The frame is section 0 of 3
+(`CertCurrentSection 0`, `CertMaxSection 3`), so a full authentication sends four.
+
+Everything before it in the trace works: StartIDPS, GetiPodOptionsForLingo,
+SetFIDTokenValues (99 bytes, correctly split over two reports, `0x02` then `0x01`;
+it names the head unit `CarNavigationSystem`, Clarion, X9U6), EndIDPS and
+GetDevAuthenticationInfo.
 
 Either fault alone breaks the message. The first one is handled now: the client
 (VadosKebaba/ipod, pi5-support) reads a `0x02` report that arrives mid-frame as a
-continuation. The bytes the head unit never sent can't be recovered, so the way out
-is to give it nothing to split: a descriptor whose output report holds the whole frame.
+continuation, so replaying this trace now yields the 248 bytes as one frame (before,
+it kept only the last 124) — which then fails its checksum, as it must
+(`hid/testdata` in the client repo, `TestQ60ClarionTrace`). The bytes the head unit
+never sent can't be recovered, so the way out is to give it nothing to split: a
+descriptor whose output report holds the whole frame.
 
 ## Test #3: legacy descriptor at full speed — rejected
 

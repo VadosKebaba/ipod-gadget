@@ -11,10 +11,12 @@ rm -f /etc/systemd/system/aucd-bt.service
 systemctl daemon-reload
 
 [ -e /etc/modprobe.d/ipod-gadget-desk.conf ] && /usr/local/bin/ipod-desk-mode off
-rm -f /usr/local/bin/aucd-bt /usr/local/bin/aucd-audio-check /usr/local/bin/ipod-desk-mode
+rm -f /usr/local/bin/aucd-bt /usr/local/bin/aucd-audio-check /usr/local/bin/aucd-audio-diag /usr/local/bin/ipod-desk-mode
 rm -f /etc/pipewire/pipewire.conf.d/50-aucd-ipod.conf \
 	/etc/wireplumber/wireplumber.conf.d/50-aucd-ipod.conf \
-	/etc/wireplumber/wireplumber.conf.d/51-aucd-bluetooth.conf
+	/etc/wireplumber/wireplumber.conf.d/51-aucd-bluetooth.conf \
+	/etc/pipewire/pipewire.conf.d/90-aucd-diag.conf \
+	/etc/wireplumber/wireplumber.conf.d/90-aucd-diag.conf
 rm -f /etc/default/aucd-audio
 
 if [ -n "$U" ] && id "$U" > /dev/null 2>&1; then

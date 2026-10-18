@@ -1,0 +1,423 @@
+#!/usr/bin/python3
+"""aucd-audio-diag: where the Pi's share of the audio delay goes, and what happened at a hiccup
+(ipod-gadget extras/pi-audio). Run with sudo (or as the PipeWire user: latency only).
+
+  aucd-audio-diag latency [SECONDS]
+                      the Pi's part of the delay, phone to car, measured while the phone
+                      plays: Bluetooth jitter buffer, graph cycle, iPod output buffer,
+                      USB queue, and the total the Pi reports to the phone (A2DP delay
+                      reporting). Samples the iPod output for SECONDS (default 2)
+  sudo aucd-audio-diag hiccup [MINUTES]
+                      right after a break in the audio: everything logged in the last
+                      MINUTES (default 3) by the kernel (g_ipod_audio, USB), PipeWire,
+                      WirePlumber, bluetoothd, the iAP client and NetworkManager, plus the
+                      xrun counters; printed and saved to ~/aucd-hiccup-<time>.log
+  sudo aucd-audio-diag logs on|off|status
+                      more detail in those logs: PipeWire at info (every xrun), the phone's
+                      Bluetooth jitter buffer once a second (target, level, spikes).
+                      Restarts PipeWire and WirePlumber (the phone reconnects by itself)
+"""
+
+import json
+import os
+import pwd
+import re
+import signal
+import subprocess
+import sys
+import time
+
+STATE = "/var/lib/aucd-audio"
+PCM = "/proc/asound/iPodUSB/pcm0p/sub0"
+STREAMING = "/sys/module/g_ipod_audio/parameters/streaming"
+PW_DIAG = "/etc/pipewire/pipewire.conf.d/90-aucd-diag.conf"
+WP_DIAG = "/etc/wireplumber/wireplumber.conf.d/90-aucd-diag.conf"
+USB_QUEUE_MS = 4.0  # g_ipod_audio: 4 isochronous requests of 1 ms queued ahead
+
+PW_DIAG_TEXT = """\
+# aucd-audio-diag logs on (remove with: sudo aucd-audio-diag logs off)
+# info: every xrun ("XRun!", "graph xrun") of the iPod output and the graph
+context.properties = {
+    log.level = 3
+}
+"""
+# the phone's stream (the bluez5 nodes run inside WirePlumber): the jitter buffer's state
+# once a second ("avg:... target:... level:... buffer:... spike:... corr:...")
+WP_DIAG_TEXT = """\
+# aucd-audio-diag logs on (remove with: sudo aucd-audio-diag logs off)
+context.properties = {
+    log.level = "2,spa.bluez5.source.media:4,spa.bluez5:3"
+}
+"""
+
+
+def out(msg=""):
+    print(msg, flush=True)
+
+
+def pipewire_user():
+    try:
+        with open(STATE + "/user") as f:
+            name = f.read().strip()
+    except OSError:
+        name = os.environ.get("SUDO_USER") or pwd.getpwuid(os.getuid()).pw_name
+    return pwd.getpwnam(name)
+
+
+def run(argv, timeout=10):
+    try:
+        p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=timeout, text=True)
+        return p.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def as_user(user, argv, timeout=10):
+    env = ["env", "XDG_RUNTIME_DIR=/run/user/%d" % user.pw_uid]
+    if os.getuid() == user.pw_uid:
+        return run(env + argv, timeout)
+    if os.getuid() == 0:
+        return run(["runuser", "-u", user.pw_name, "--"] + env + argv, timeout)
+    sys.exit("run as root or as %s" % user.pw_name)
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def proc_fields(text):
+    # /proc/asound/.../status and hw_params: "key: value" or "key : value"
+    d = {}
+    for line in text.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            d[k.strip()] = v.strip()
+    return d
+
+
+def settings(user):
+    # pw-metadata: update: id:0 key:'clock.quantum' value:'512' type:''
+    d = {}
+    for m in re.finditer(r"key:'([^']*)' value:'([^']*)'", as_user(user, ["pw-metadata", "-n", "settings", "0"])):
+        d[m.group(1)] = m.group(2)
+    return d
+
+
+def pw_top(user):
+    # one line per node: S ID QUANT RATE WAIT BUSY W/Q B/Q ERR FORMAT... NAME
+    rows = {}
+    for line in as_user(user, ["timeout", "5", "pw-top", "-b", "-n", "2"], 8).splitlines():
+        f = line.split()
+        if len(f) < 10 or not f[1].isdigit():
+            continue
+        rows[f[-1]] = {"id": int(f[1]), "quant": f[2], "rate": f[3], "err": f[8]}
+    return rows
+
+
+def pw_dump(user):
+    try:
+        return json.loads(as_user(user, ["pw-dump"], 15) or "[]")
+    except ValueError:
+        return []
+
+
+def props(obj):
+    return (obj.get("info") or {}).get("props") or {}
+
+
+def find_node(dump, pattern, media_class=None):
+    for o in dump:
+        if o.get("type") != "PipeWire:Interface:Node":
+            continue
+        p = props(o)
+        if re.search(pattern, str(p.get("node.name", ""))) and \
+                (media_class is None or p.get("media.class") == media_class):
+            return o
+    return None
+
+
+def ports(dump, node_id, direction):
+    return [o for o in dump if o.get("type") == "PipeWire:Interface:Port"
+            and props(o).get("node.id") == node_id
+            and (o.get("info") or {}).get("direction") == direction]
+
+
+def port_latency(port, direction):
+    for lat in ((port.get("info") or {}).get("params") or {}).get("Latency") or []:
+        if str(lat.get("direction", "")).lower() == direction:
+            return lat
+    return None
+
+
+def node_rate(node):
+    # the stream's own rate (the codec's), "1/48000"
+    m = re.match(r"1/(\d+)$", str(props(node).get("node.rate", "")))
+    return int(m.group(1)) if m else None
+
+
+def lat_ms(lat, quantum, rate):
+    if not lat or not rate:
+        return None
+    q = float(lat.get("minQuantum", 0)) * quantum
+    return (q + float(lat.get("minRate", 0))) * 1000.0 / rate + float(lat.get("minNs", 0)) / 1e6
+
+
+def bt_transports():
+    """[(device name, codec, state, delay in ms or None)] from BlueZ, [] without it."""
+    try:
+        import dbus
+        bus = dbus.SystemBus()
+        om = dbus.Interface(bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
+        objs = om.GetManagedObjects()
+    except Exception:
+        return []
+    res = []
+    for path, ifs in sorted(objs.items()):
+        t = ifs.get("org.bluez.MediaTransport1")
+        if not t:
+            continue
+        dev = objs.get(str(t.get("Device")), {}).get("org.bluez.Device1", {})
+        codec = {0: "SBC", 2: "AAC"}.get(int(t.get("Codec", 255)), "codec %d" % int(t.get("Codec", 255)))
+        delay = int(t["Delay"]) / 10.0 if "Delay" in t else None
+        res.append((str(dev.get("Alias") or dev.get("Address") or path), codec, str(t.get("State")), delay))
+    return res
+
+
+def sample_pcm(seconds):
+    """iPod output: frames queued in the ALSA buffer (min, average, max), or None."""
+    delays = []
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        st = proc_fields(read(PCM + "/status"))
+        if st.get("state") == "RUNNING" and st.get("delay", "").lstrip("-").isdigit():
+            delays.append(int(st["delay"]))
+        time.sleep(0.02)
+    if not delays:
+        return None
+    return min(delays), sum(delays) / len(delays), max(delays)
+
+
+def cmd_latency(args):
+    seconds = float(args[0]) if args else 2.0
+    user = pipewire_user()
+    s = settings(user)
+    top = pw_top(user)
+    dump = pw_dump(user)
+    rate = int(s.get("clock.rate") or 44100)
+
+    out("== graph")
+    ipod_top = next((v for k, v in top.items() if "snd_usb_ipod" in k), None)
+    quantum = int(ipod_top["quant"]) if ipod_top and ipod_top["quant"].isdigit() and int(ipod_top["quant"]) else \
+        int(s.get("clock.quantum") or 1024)
+    out("  rate %d Hz, cycle (quantum) %d samples = %.1f ms; settings: quantum %s, min %s, max %s, forced %s"
+        % (rate, quantum, quantum * 1000.0 / rate, s.get("clock.quantum", "?"), s.get("clock.min-quantum", "?"),
+           s.get("clock.max-quantum", "?"), s.get("clock.force-quantum", "0")))
+    if ipod_top:
+        out("  iPod output: xruns so far %s (pw-top ERR)" % ipod_top["err"])
+
+    parts = []
+    jitter = down_ms = None
+    out("== the phone over Bluetooth")
+    bt = find_node(dump, r"^bluez_input\.")
+    if not bt:
+        out("  no Bluetooth stream (the phone not connected, or not playing)")
+    else:
+        bp = props(bt)
+        out("  node %s: %s" % (bt.get("id"), bp.get("media.name", bp.get("node.name"))))
+        for port in ports(dump, bt.get("id"), "output")[:1]:
+            brate = node_rate(bt) or rate
+            own = port_latency(port, "output")
+            down = port_latency(port, "input")
+            if own and own.get("minRate"):
+                jitter = float(own["minRate"]) * 1000.0 / brate
+                out("  jitter buffer target %d samples at %d Hz = %.1f ms (adaptive: 1.5 x the worst gap"
+                    " between packets in the last 2 minutes, at least one cycle, in 20 ms steps)"
+                    % (int(own["minRate"]), brate, jitter))
+            if down:
+                down_ms = lat_ms(down, quantum, rate)
+                out("  what PipeWire counts after it (graph + iPod output): %.1f ms" % down_ms)
+            if top:
+                bt_top = top.get(bp.get("node.name"))
+                if bt_top:
+                    out("  xruns of the stream so far %s (pw-top ERR)" % bt_top["err"])
+    for name, codec, state, delay in bt_transports():
+        if delay is None:
+            out("  %s: %s %s, no delay reporting (the phone didn't ask for it)" % (name, codec, state))
+        else:
+            out("  %s: %s %s, delay reported to the phone %.1f ms (it delays video by this)" % (name, codec, state, delay))
+            if bt and jitter is None and down_ms is not None and delay > down_ms:
+                jitter = delay - down_ms
+                out("  jitter buffer target (from the delay reported) about %.1f ms" % jitter)
+    if bt:
+        if jitter is None:
+            out("  jitter buffer target: not shown by this PipeWire, and no delay reported")
+        else:
+            parts.append(("Bluetooth jitter buffer (PipeWire's target)", jitter))
+
+
+    out("== iPod output (g_ipod_audio)")
+    out("  car taking audio: %s" % (read(STREAMING).strip() or "?"))
+    hw = proc_fields(read(PCM + "/hw_params"))
+    if hw.get("buffer_size"):
+        out("  ALSA buffer %s frames (%.0f ms), period %s frames: PipeWire keeps only about one cycle"
+            " + headroom of it filled" % (hw["buffer_size"], int(hw["buffer_size"]) * 1000.0 / rate,
+                                           hw.get("period_size", "?")))
+    sink = find_node(dump, r"snd_usb_ipod", "Audio/Sink")
+    if sink:
+        sp = props(sink)
+        out("  headroom %s samples, latency.internal.ns %s (node %s)"
+            % (sp.get("api.alsa.headroom", "?"), sp.get("latency.internal.ns", "0"), sink.get("id")))
+        for port in ports(dump, sink.get("id"), "input")[:1]:
+            ms = lat_ms(port_latency(port, "input"), quantum, rate)
+            if ms is not None:
+                out("  it tells PipeWire it adds %.1f ms (headroom + internal; part of the delay reported)" % ms)
+    measured = sample_pcm(seconds)
+    if measured:
+        lo, avg, hi = measured
+        out("  queued in ALSA now (%.0f s sampled): min %.1f, avg %.1f, max %.1f ms"
+            % (seconds, lo * 1000.0 / rate, avg * 1000.0 / rate, hi * 1000.0 / rate))
+        parts.append(("iPod output ALSA buffer, measured (the graph cycle + headroom)", avg * 1000.0 / rate))
+    else:
+        out("  iPodUSB PCM not running: nothing to measure")
+    parts.append(("g_ipod_audio USB requests queued ahead", USB_QUEUE_MS))
+
+    out("== the Pi's share, phone packet in to USB packet out (to verify on the Pi)")
+    for what, ms in parts:
+        out("  %6.1f ms  %s" % (ms, what))
+    out("  %6.1f ms  total; not counted: SBC decoding and resampling (~1-3 ms), the iPhone's own"
+        % sum(ms for _, ms in parts))
+    out("             buffering before it sends, and the head unit's after the USB")
+    return 0
+
+
+def journal(since, *matches, grep=None, tail=300):
+    text = run(["journalctl", "--no-pager", "-o", "short-precise", "--since", since] + list(matches), 30)
+    lines = text.splitlines()
+    if grep:
+        lines = [l for l in lines if re.search(grep, l)]
+    return lines[-tail:]
+
+
+def cmd_hiccup(args):
+    if os.getuid() != 0:
+        sys.exit("run with sudo (the journals)")
+    minutes = int(args[0]) if args else 3
+    since = "-%dmin" % minutes
+    user = pipewire_user()
+    report = []
+
+    def say(msg=""):
+        out(msg)
+        report.append(msg)
+
+    def section(title, lines, empty="  (nothing)"):
+        say("== " + title)
+        for line in lines or [empty]:
+            say(line if line.startswith("  ") else "  " + line)
+
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    say("aucd-audio-diag hiccup, %s, the last %d minutes; uptime %s s" % (now, minutes, read("/proc/uptime").split()[0]))
+
+    lines = ["car taking audio now: %s" % (read(STREAMING).strip() or "? (g_ipod_audio not loaded)")]
+    st = proc_fields(read(PCM + "/status"))
+    lines.append("iPodUSB PCM: %s" % (", ".join("%s %s" % (k, st[k]) for k in ("state", "delay", "avail", "hw_ptr")
+                                                if k in st) or "closed"))
+    for name, row in sorted(pw_top(user).items()):
+        if "snd_usb_ipod" in name or name.startswith("bluez_"):
+            lines.append("pw-top %s: quantum %s rate %s xruns (ERR) %s" % (name, row["quant"], row["rate"], row["err"]))
+    t = run(["vcgencmd", "get_throttled"]).strip()
+    if t:
+        lines.append("%s, %s" % (t, run(["vcgencmd", "measure_temp"]).strip()))
+    lines.append("load average %s" % " ".join(read("/proc/loadavg").split()[:3]))
+    lines.append("diagnostic logging: %s" % ("on" if os.path.exists(PW_DIAG) else "off (sudo aucd-audio-diag logs on: more detail next time)"))
+    section("now: counters (ERR counts since PipeWire started)", lines)
+
+    section("Bluetooth", [l for l in run(["aucd-bt", "status"]).splitlines()])
+    for name, codec, state, delay in bt_transports():
+        say("  transport %s: %s %s, delay reported %s" % (name, codec, state, "%.1f ms" % delay if delay is not None else "none"))
+
+    section("kernel: g_ipod_audio ('audio start' / 'audio stop' = the car switched the audio interface), USB, radio",
+            journal(since, "-k", grep=r"(?i)ipod|dwc2|usb|brcmf|bluetooth|hci|under-?voltage|throttl"))
+    section("PipeWire, WirePlumber (XRun, graph xrun, Bluetooth jitter buffer)",
+            journal(since, "_UID=%d" % user.pw_uid, "_SYSTEMD_USER_UNIT=pipewire.service",
+                    "_SYSTEMD_USER_UNIT=wireplumber.service", "_SYSTEMD_USER_UNIT=pipewire-pulse.service"))
+    section("bluetoothd, aucd-bt", journal(since, "-u", "bluetooth", "-u", "aucd-bt"))
+    section("iAP client (the car's requests about audio, the phone's codec)",
+            journal(since, "-u", "ipod-client",
+                    grep=r"(?i)player:|phone: codec|codec|audio|samplerate|sample rate|playcontrol|error|warn|disconnect|reset"))
+    section("Wi-Fi (NetworkManager, hostapd, wpa_supplicant)",
+            journal(since, "-u", "NetworkManager", "-u", "hostapd", "-u", "wpa_supplicant", tail=100))
+
+    say("== what to look for, at the time of the break")
+    for hint in (
+            "'audio stop' / 'audio start' (kernel): the car switched its audio interface; breaks during the",
+            "  car's own start-up are the car's, not the Pi's",
+            "'XRun!' / 'graph xrun' (PipeWire, with logs on) or ERR going up on the iPod output: the Pi missed",
+            "  a graph cycle (busy CPU at boot): more headroom (README, \"Latency\")",
+            "the jitter buffer's 'target:' / 'spike:' jumping (WirePlumber, with logs on), no xrun: Bluetooth",
+            "  packets came late (radio): hotspot to 5 GHz (README, \"Wi-Fi and Bluetooth\")",
+            "Wi-Fi events (a client joining the hotspot, a scan) at the same second: shared 2.4 GHz radio",
+            "'phone: codec' or transport state changes (bluetoothd): the A2DP stream (re)started"):
+        say("  " + hint)
+
+    path = os.path.join(user.pw_dir, "aucd-hiccup-%s.log" % time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(report) + "\n")
+        os.chown(path, user.pw_uid, user.pw_gid)
+        out("\nsaved: %s" % path)
+    except OSError as e:
+        out("\nnot saved: %s" % e)
+    return 0
+
+
+def restart_audio(user):
+    run(["systemctl", "--user", "-M", user.pw_name + "@", "restart",
+         "pipewire.service", "pipewire-pulse.service", "wireplumber.service"], 30)
+
+
+def cmd_logs(args):
+    what = args[0] if args else "status"
+    if what == "status":
+        out("diagnostic logging: %s" % ("on" if os.path.exists(PW_DIAG) or os.path.exists(WP_DIAG) else "off"))
+        return 0
+    if what not in ("on", "off"):
+        out("usage: aucd-audio-diag logs on|off|status")
+        return 2
+    if os.getuid() != 0:
+        sys.exit("run with sudo")
+    user = pipewire_user()
+    if what == "on":
+        for path, text in ((PW_DIAG, PW_DIAG_TEXT), (WP_DIAG, WP_DIAG_TEXT)):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(text)
+    else:
+        for path in (PW_DIAG, WP_DIAG):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    restart_audio(user)
+    out("diagnostic logging %s; PipeWire and WirePlumber restarted (the phone reconnects within a minute)" % what)
+    if what == "on":
+        out("after a break: sudo aucd-audio-diag hiccup; when done: sudo aucd-audio-diag logs off")
+    return 0
+
+
+def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # | head
+    cmds = {"latency": cmd_latency, "hiccup": cmd_hiccup, "logs": cmd_logs}
+    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
+        print(__doc__.strip())
+        return 2
+    return cmds[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

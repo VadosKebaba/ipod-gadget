@@ -88,6 +88,7 @@ fi
 echo "== Bluetooth"
 install -m 755 "$HERE/bin/aucd-bt" /usr/local/bin/aucd-bt
 install -m 755 "$HERE/bin/aucd-audio-check" /usr/local/bin/aucd-audio-check
+install -m 755 "$HERE/bin/aucd-audio-diag" /usr/local/bin/aucd-audio-diag
 install -m 755 "$HERE/bin/ipod-desk-mode" /usr/local/bin/ipod-desk-mode
 [ -f /etc/default/aucd-audio ] || install -m 644 "$HERE/aucd-audio.default" /etc/default/aucd-audio
 install -m 644 "$HERE/systemd/aucd-bt.service" /etc/systemd/system/aucd-bt.service

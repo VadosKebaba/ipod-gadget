@@ -70,8 +70,9 @@ It ends with `installed /usr/local/bin/ipod, ipod-client.service starts at boot`
 ## 5. Only if the head unit fails: client and descriptor options
 
 The defaults need nothing. If authentication stops because the head unit's certificate
-or signature packets arrive damaged (the trace shows them failing their checksum, as on
-a 2014 Infiniti Q60, [q60-notes.md](q60-notes.md)), let the client accept them:
+or signature packets arrive damaged (the trace shows them failing their checksum), let
+the client accept them. A 2014 Infiniti Q60 needs exactly this and nothing else
+([q60-notes.md](q60-notes.md)):
 
 ```bash
 sudo sed -i 's/^IPOD_GLOBAL_ARGS=.*/IPOD_GLOBAL_ARGS="--lenient-auth"/' /etc/default/ipod-client
@@ -80,7 +81,7 @@ sudo systemctl restart ipod-client
 
 The other options change the HID descriptor (*HID descriptor and speed* in the
 [README](../README.md)); there the kernel option and the client flag always change
-together. For example `bigout` (which the Q60's head unit rejects):
+together. For example `bigout` (not tried on a car yet):
 
 ```bash
 echo 'options g_ipod_hid hid_desc=bigout' | sudo tee -a /etc/modprobe.d/ipod-gadget.conf
@@ -118,7 +119,8 @@ journalctl -u ipod-client -f
 journal shows the iAP traffic live. Traces are in `/var/lib/ipod`: `ipod.trace` is the
 current run, older runs are kept as `ipod-<date>.trace` (`ls -lt /var/lib/ipod`). In a
 trace, `<` lines come from the head unit, and their first byte is the report id. No `<`
-lines at all after the head unit read the descriptor means it rejected the descriptor.
+lines at all after the head unit read the descriptor means it rejected the descriptor (or
+the gadget's replies to it: `tools/hid-desc-check.c` checks them from a Linux PC).
 Copy one to a PC with:
 
 ```bash

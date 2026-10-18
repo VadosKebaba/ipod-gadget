@@ -129,8 +129,9 @@ then `sudo reboot` (or reload the modules and `sudo systemctl restart ipod-clien
 `cat /sys/class/udc/*/current_speed` shows what the head unit actually connected at
 (`high-speed` / `full-speed`; on a Pi 5 the controller is `1000480000.usb`).
 
-Known for one car: the 2014 Infiniti Q60's Clarion X9U6 accepts only `default` at full speed; it
-rejects `legacy` (at full and at high speed) and `bigout`, disconnecting right after it reads the descriptor.
+Whichever descriptor you pick, the gadget answers a head unit's GET_DESCRIPTOR with exactly the number of
+bytes asked for, as upstream does: the Q60's head unit (below) disconnects otherwise. `tools/hid-desc-check.c`
+checks that from a Linux PC.
 
 ### Damaged authentication packets: `--lenient-auth`
 
@@ -156,6 +157,15 @@ Both the car's port and the Pi's supply put 5 V on VBUS, so a data-only adapter 
 between them avoids tying the two supplies together; check on the bench that the head unit still detects the Pi that way.
 Powered through the header, the Pi 5 limits its USB-A ports to 600 mA unless `usb_max_current_enable=1` is set in `config.txt`
 (only with a supply that can deliver 5 A).
+
+### Known to work: 2014 Infiniti Q60 (Clarion X9U6)
+
+Plays music from a Pi 5 with the defaults (full speed, `hid_desc=default`, no module options) and
+`IPOD_GLOBAL_ARGS="--lenient-auth"`: the head unit damages its certificate packets, and the client needs to
+report *playing* after the head unit's PlayControl, or the head unit mutes and stops taking audio (the
+VadosKebaba/ipod client does both). The Pi needs its own 5 V supply through a VBUS-cut cable, and one that
+holds 5 V: the test run logged an undervoltage blip from the power bank. Details and the full session:
+[doc/q60-notes.md](doc/q60-notes.md).
 
 ## client app
 

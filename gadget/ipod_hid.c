@@ -402,8 +402,13 @@ static int ipod_hid_setup(struct usb_function *func, const struct usb_ctrlreques
 	{
 	case USB_REQ_GET_DESCRIPTOR:
 		VDBG(cdev, "get hid descriptor\n");
-		length = min_t(int, w_length, hid->report_desc_len);
-		memcpy(req->buf, hid->report_desc, length);
+		// As upstream, and it has to stay that way: whatever descriptor is asked for (0x21
+		// too) the reply is the report descriptor, exactly wLength bytes long, the rest
+		// being whatever the ep0 buffer holds. The Clarion X9U6 (2014 Infiniti Q60) asks for
+		// 0x21, reads 0x0875 out of those 9 bytes as the report descriptor's length and then
+		// asks for 2165 bytes; trimming the reply to the descriptor's size made it disconnect
+		// (doc/q60-notes.md).
+		memcpy(req->buf, hid->report_desc, hid->report_desc_len);
 		goto respond;
 		break;
 	case HID_REQ_GET_REPORT:
@@ -432,8 +437,7 @@ static int ipod_hid_setup(struct usb_function *func, const struct usb_ctrlreques
 	return -EOPNOTSUPP;
 
 respond:
-	// only a descriptor shorter than requested ends early: zero-length packet if needed
-	req->zero = length < w_length;
+	req->zero = 0;
 	req->length = length;
 	status = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
 	if (status < 0)

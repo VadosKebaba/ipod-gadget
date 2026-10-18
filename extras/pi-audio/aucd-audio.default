@@ -1,0 +1,7 @@
+# ipod-gadget extras/pi-audio settings (/etc/default/aucd-audio)
+
+# what the phone shows in its Bluetooth list
+BT_NAME=AUCD
+# how long "sudo aucd-bt pair" keeps the Pi visible and pairable
+BT_PAIR_SECONDS=120
+BT_ADAPTER=hci0

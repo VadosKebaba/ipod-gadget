@@ -1,0 +1,39 @@
+#!/bin/bash
+# ipod-desk-mode on|off|status (ipod-gadget extras/pi-audio)
+#
+# A PC (Windows, macOS) always takes a USB device's first configuration, and the gadget's
+# first one is the fake PTP camera; a head unit picks the iPod configuration itself. "on"
+# loads the gadget with only the iPod configuration, so a PC sees its audio as a USB
+# microphone ("iPod"); "off" goes back to the normal layout. Turn it off before the car.
+set -euo pipefail
+CONF=/etc/modprobe.d/ipod-gadget-desk.conf
+
+reload() {
+	systemctl stop ipod-client 2>/dev/null || true
+	modprobe -r g_ipod_gadget
+	modprobe g_ipod_gadget
+	systemctl start ipod-client 2>/dev/null || true
+}
+
+case "${1:-status}" in
+on)
+	[ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
+	echo "options g_ipod_gadget only_ipod=1" > "$CONF"
+	reload
+	echo "desk mode on: plug the Pi's USB-C into the PC; it shows up as an \"iPod\" recording device."
+	echo "Run 'sudo ipod-desk-mode off' before plugging it into the car."
+	;;
+off)
+	[ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
+	rm -f "$CONF"
+	reload
+	echo "desk mode off: normal configurations, ready for the car"
+	;;
+status)
+	if [ -e "$CONF" ]; then echo "desk mode: on ($CONF)"; else echo "desk mode: off"; fi
+	;;
+*)
+	echo "usage: ipod-desk-mode on|off|status" >&2
+	exit 2
+	;;
+esac

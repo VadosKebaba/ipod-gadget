@@ -127,6 +127,16 @@ Copy one to a PC with:
 scp <user>@<pi-address>:/var/lib/ipod/ipod.trace .
 ```
 
+## 8. Optional: the car as the Pi's speaker
+
+So that everything the Pi plays goes to the car (Bluetooth from the phone, the browser,
+AUCD's sounds), always on and with nobody logged in, plus the Pi as a Bluetooth speaker for
+the phone: [extras/pi-audio](../extras/pi-audio/README.md).
+
+```bash
+cd ~/ipod-gadget && sudo bash extras/pi-audio/install.sh && sudo reboot
+```
+
 ## Back to the default descriptor
 
 ```bash

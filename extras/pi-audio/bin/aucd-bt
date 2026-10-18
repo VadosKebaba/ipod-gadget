@@ -1,0 +1,399 @@
+#!/usr/bin/python3
+"""aucd-bt: the Pi as a Bluetooth speaker for the phone, headless (ipod-gadget extras/pi-audio).
+
+  sudo aucd-bt pair [SECONDS]  open a pairing window (default BT_PAIR_SECONDS, 120 s): the Pi
+                               is visible as BT_NAME ("AUCD") and pairs with the phone that asks,
+                               no PIN; the phone is trusted, and the window closes as soon as it
+                               is paired and connected, or when the time is up
+  aucd-bt autoconnect          the daemon behind aucd-bt.service: names the adapter, keeps it
+                               invisible and not pairable, and connects to the trusted phone
+                               whenever it is around (every 10 s for the first 3 minutes after
+                               start, then every 60 s)
+  aucd-bt status               adapter, paired devices, connection and codec
+  sudo aucd-bt forget ADDRESS  unpair a device
+
+Settings: /etc/default/aucd-audio (BT_NAME, BT_PAIR_SECONDS, BT_ADAPTER).
+"""
+
+import glob
+import os
+import signal
+import sys
+import time
+
+import dbus
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
+
+BLUEZ = "org.bluez"
+ADAPTER = "org.bluez.Adapter1"
+DEVICE = "org.bluez.Device1"
+TRANSPORT = "org.bluez.MediaTransport1"
+PROPS = "org.freedesktop.DBus.Properties"
+A2DP_SOURCE = "0000110a-0000-1000-8000-00805f9b34fb"  # the phone's end of A2DP
+PAIRING_LOCK = "/run/aucd-bt-pairing"  # while a window is open, the daemon leaves the adapter alone
+LAST_FILE = "/var/lib/aucd-audio/last-phone"
+AGENT_PATH = "/aucd/agent"
+CODECS = {0x00: "SBC", 0x01: "MP3", 0x02: "AAC", 0x04: "ATRAC", 0xFF: "vendor"}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def config():
+    cfg = {"BT_NAME": "AUCD", "BT_PAIR_SECONDS": "120", "BT_ADAPTER": "hci0"}
+    try:
+        with open("/etc/default/aucd-audio") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return cfg
+
+
+def objects(bus):
+    om = dbus.Interface(bus.get_object(BLUEZ, "/"), "org.freedesktop.DBus.ObjectManager")
+    return om.GetManagedObjects()
+
+
+def find_adapter(objs, name):
+    adapters = sorted(p for p, ifs in objs.items() if ADAPTER in ifs)
+    want = "/org/bluez/" + name
+    if want in adapters:
+        return want
+    return adapters[0] if adapters else None
+
+
+def devices(objs, adapter):
+    return [(p, ifs[DEVICE]) for p, ifs in sorted(objs.items())
+            if DEVICE in ifs and ifs[DEVICE].get("Adapter") == adapter]
+
+
+def set_prop(bus, path, iface, name, value):
+    dbus.Interface(bus.get_object(BLUEZ, path), PROPS).Set(iface, name, value)
+
+
+def name_of(props):
+    return str(props.get("Alias") or props.get("Name") or props.get("Address"))
+
+
+def is_phone(props):
+    # a device that can send A2DP audio (before its services are known, take it anyway)
+    uuids = [str(u).lower() for u in props.get("UUIDs", [])]
+    return not uuids or A2DP_SOURCE in uuids
+
+
+def last_phone():
+    try:
+        with open(LAST_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def remember_phone(address):
+    if address and address != last_phone():
+        try:
+            os.makedirs(os.path.dirname(LAST_FILE), exist_ok=True)
+            with open(LAST_FILE, "w") as f:
+                f.write(address + "\n")
+        except OSError:
+            pass
+
+
+class Agent(dbus.service.Object):
+    """Pairs with whatever asks, without a PIN: only registered while a pairing window is open."""
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Release(self):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
+    def RequestPinCode(self, device):
+        return "0000"
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
+    def RequestPasskey(self, device):
+        return dbus.UInt32(0)
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="ouq", out_signature="")
+    def DisplayPasskey(self, device, passkey, entered):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+    def DisplayPinCode(self, device, pincode):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        log("pairing request from %s (code %06d), accepted" % (device, passkey))
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
+    def RequestAuthorization(self, device):
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Cancel(self):
+        pass
+
+
+def wait_adapter(bus, cfg, seconds):
+    deadline = time.time() + seconds
+    while True:
+        try:
+            adapter = find_adapter(objects(bus), cfg["BT_ADAPTER"])
+            if adapter:
+                return adapter
+        except dbus.DBusException:
+            pass
+        if time.time() >= deadline:
+            return None
+        time.sleep(1)
+
+
+def cmd_pair(args):
+    cfg = config()
+    seconds = int(args[0]) if args else int(cfg["BT_PAIR_SECONDS"])
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    adapter = wait_adapter(bus, cfg, 10)
+    if not adapter:
+        log("no Bluetooth adapter (is bluetooth.service running? rfkill unblock bluetooth?)")
+        return 2
+
+    open(PAIRING_LOCK, "w").close()
+    agent = Agent(bus, AGENT_PATH)
+    manager = dbus.Interface(bus.get_object(BLUEZ, "/org/bluez"), "org.bluez.AgentManager1")
+    result = {"paired": None}
+    loop = GLib.MainLoop()
+    before = {p for p, d in devices(objects(bus), adapter) if d.get("Paired")}
+
+    def check():
+        # new pairings: trust them; done once the new phone is also connected
+        try:
+            for path, props in devices(objects(bus), adapter):
+                if not props.get("Paired") or path in before:
+                    continue
+                if not props.get("Trusted"):
+                    set_prop(bus, path, DEVICE, "Trusted", True)
+                    log("paired and trusted: %s (%s)" % (name_of(props), props.get("Address")))
+                    remember_phone(str(props.get("Address")))
+                if result["paired"] is None:
+                    result["paired"] = (path, time.time())
+                if props.get("Connected") or time.time() - result["paired"][1] > 20:
+                    loop.quit()
+        except dbus.DBusException as e:
+            log("check: %s" % e)
+        return True
+
+    def timeout():
+        log("pairing window closed after %d s%s" % (seconds, "" if result["paired"] else ": nothing paired"))
+        loop.quit()
+        return False
+
+    try:
+        manager.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+        manager.RequestDefaultAgent(AGENT_PATH)
+        set_prop(bus, adapter, ADAPTER, "Powered", True)
+        set_prop(bus, adapter, ADAPTER, "Alias", cfg["BT_NAME"])
+        set_prop(bus, adapter, ADAPTER, "PairableTimeout", dbus.UInt32(0))
+        set_prop(bus, adapter, ADAPTER, "Pairable", True)
+        set_prop(bus, adapter, ADAPTER, "DiscoverableTimeout", dbus.UInt32(seconds))
+        set_prop(bus, adapter, ADAPTER, "Discoverable", True)
+        log("visible as \"%s\" for %d s: on the phone, Settings > Bluetooth > %s" % (cfg["BT_NAME"], seconds, cfg["BT_NAME"]))
+        GLib.timeout_add_seconds(1, check)
+        GLib.timeout_add_seconds(seconds, timeout)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: (loop.quit(), False)[1])
+        loop.run()
+    finally:
+        for name, value in (("Discoverable", False), ("Pairable", False)):
+            try:
+                set_prop(bus, adapter, ADAPTER, name, value)
+            except dbus.DBusException:
+                pass
+        try:
+            manager.UnregisterAgent(AGENT_PATH)
+        except dbus.DBusException:
+            pass
+        try:
+            os.unlink(PAIRING_LOCK)
+        except OSError:
+            pass
+    if result["paired"]:
+        log("done: no longer visible or pairable; the phone reconnects by itself from now on")
+        return 0
+    return 1
+
+
+def cmd_autoconnect(args):
+    cfg = config()
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    loop = GLib.MainLoop()
+    started = time.monotonic()
+    state = {"adapter": None, "busy": False, "connected": None}
+
+    def lock_active():
+        try:
+            return time.time() - os.stat(PAIRING_LOCK).st_mtime < 15 * 60
+        except OSError:
+            return False
+
+    def setup_adapter(adapter):
+        # once per adapter appearance (boot, bluetoothd restart): a window opened later by
+        # anyone else (the dash's "visible to phones") is left alone
+        try:
+            set_prop(bus, adapter, ADAPTER, "Powered", True)
+            set_prop(bus, adapter, ADAPTER, "Alias", cfg["BT_NAME"])
+            if not lock_active():
+                set_prop(bus, adapter, ADAPTER, "Discoverable", False)
+                set_prop(bus, adapter, ADAPTER, "Pairable", False)
+            log("adapter %s: named \"%s\", not visible, not pairable" % (adapter, cfg["BT_NAME"]))
+            return True
+        except dbus.DBusException as e:
+            log("adapter %s not ready: %s" % (adapter, e.get_dbus_message()))
+            return False
+
+    def tick():
+        try:
+            objs = objects(bus)
+            adapter = find_adapter(objs, cfg["BT_ADAPTER"])
+            if adapter != state["adapter"]:
+                state["adapter"] = adapter if adapter and setup_adapter(adapter) else None
+            if not state["adapter"] or state["busy"] or lock_active():
+                return
+            if not objs[adapter][ADAPTER].get("Powered"):
+                set_prop(bus, adapter, ADAPTER, "Powered", True)
+                return
+            phones = [(p, d) for p, d in devices(objs, adapter)
+                      if d.get("Paired") and d.get("Trusted") and is_phone(d)]
+            connected = [d for p, d in phones if d.get("Connected")]
+            if connected:
+                address = str(connected[0].get("Address"))
+                if state["connected"] != address:
+                    log("connected: %s (%s)" % (name_of(connected[0]), address))
+                    state["connected"] = address
+                    remember_phone(address)
+                return
+            if state["connected"]:
+                log("disconnected")
+                state["connected"] = None
+            if not phones:
+                return
+            last = last_phone()
+            phones.sort(key=lambda pd: pd[1].get("Address") != last)
+            try_connect(phones, 0)
+        except dbus.DBusException as e:
+            log("bluez: %s" % e.get_dbus_message())
+            state["adapter"] = None
+
+    def try_connect(phones, i):
+        if i >= len(phones):
+            state["busy"] = False
+            return
+        path, props = phones[i]
+        state["busy"] = True
+
+        def ok():
+            state["busy"] = False
+            remember_phone(str(props.get("Address")))
+
+        def err(e):
+            # the phone is not around, or refuses: try the next one
+            try_connect(phones, i + 1)
+
+        dbus.Interface(bus.get_object(BLUEZ, path), DEVICE).Connect(
+            reply_handler=ok, error_handler=err, timeout=25)
+
+    def schedule():
+        tick()
+        interval = 10 if time.monotonic() - started < 180 else 60
+        GLib.timeout_add_seconds(interval, schedule)
+        return False
+
+    def bluez_owner(owner):
+        # bluetoothd (re)started: its adapter comes back with default settings
+        state["adapter"] = None
+        state["busy"] = False
+
+    bus.watch_name_owner(BLUEZ, bluez_owner)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: (loop.quit(), False)[1])
+    log("aucd-bt autoconnect: adapter %s, name \"%s\"" % (cfg["BT_ADAPTER"], cfg["BT_NAME"]))
+    GLib.idle_add(schedule)
+    loop.run()
+    return 0
+
+
+def cmd_status(args):
+    cfg = config()
+    bus = dbus.SystemBus()
+    try:
+        objs = objects(bus)
+    except dbus.DBusException as e:
+        log("BlueZ not reachable: %s" % e.get_dbus_message())
+        return 2
+    adapter = find_adapter(objs, cfg["BT_ADAPTER"])
+    if not adapter:
+        log("no Bluetooth adapter")
+        return 2
+    a = objs[adapter][ADAPTER]
+    log("adapter %s %s: name \"%s\", powered %s, visible %s, pairable %s" % (
+        adapter, a.get("Address"), a.get("Alias"), bool(a.get("Powered")),
+        bool(a.get("Discoverable")), bool(a.get("Pairable"))))
+    uuids = [str(u).lower() for u in a.get("UUIDs", [])]
+    log("speaker (A2DP sink) offered: %s" % ("yes" if "0000110b-0000-1000-8000-00805f9b34fb" in uuids
+                                              else "NO (PipeWire/WirePlumber not running for the user?)"))
+    aac = glob.glob("/usr/lib/*/spa-0.2/bluez5/libspa-codec-bluez5-aac.so")
+    log("AAC in this PipeWire: %s" % ("yes" if aac else "no (SBC only)"))
+    devs = devices(objs, adapter)
+    if not devs:
+        log("no devices known: pair the phone with 'sudo aucd-bt pair'")
+    for path, d in devs:
+        flags = [f for f in ("Paired", "Trusted", "Connected") if d.get(f)]
+        codec = ""
+        for p, ifs in objs.items():
+            if TRANSPORT in ifs and p.startswith(path + "/"):
+                t = ifs[TRANSPORT]
+                codec = ", audio: %s %s" % (CODECS.get(int(t.get("Codec", 0xFF)), "?"), t.get("State"))
+        log("  %s %s [%s]%s" % (d.get("Address"), name_of(d), " ".join(flags) or "-", codec))
+    return 0
+
+
+def cmd_forget(args):
+    if not args:
+        log("usage: aucd-bt forget ADDRESS")
+        return 2
+    cfg = config()
+    bus = dbus.SystemBus()
+    objs = objects(bus)
+    adapter = find_adapter(objs, cfg["BT_ADAPTER"])
+    for path, d in devices(objs, adapter):
+        if str(d.get("Address")).upper() == args[0].upper():
+            dbus.Interface(bus.get_object(BLUEZ, adapter), ADAPTER).RemoveDevice(path)
+            log("forgot %s (%s)" % (name_of(d), d.get("Address")))
+            return 0
+    log("no such device: %s" % args[0])
+    return 1
+
+
+def main():
+    cmds = {"pair": cmd_pair, "autoconnect": cmd_autoconnect, "status": cmd_status, "forget": cmd_forget}
+    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
+        print(__doc__.strip())
+        return 2
+    return cmds[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

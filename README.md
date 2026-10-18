@@ -158,6 +158,19 @@ between them avoids tying the two supplies together; check on the bench that the
 Powered through the header, the Pi 5 limits its USB-A ports to 600 mA unless `usb_max_current_enable=1` is set in `config.txt`
 (only with a supply that can deliver 5 A).
 
+### When the head unit isn't taking audio
+
+The iPodUSB card runs on the head unit's clock while it plays the iPod source, and on the
+system clock otherwise (unplugged, key off, another source), dropping the samples, so a player
+never blocks on it. `cat /sys/module/g_ipod_audio/parameters/streaming` says `Y` while the head
+unit takes audio.
+
+### The car as the Pi's speaker, Bluetooth from the phone
+
+[extras/pi-audio](extras/pi-audio/README.md) makes the iPod output the Pi's default speaker,
+always on, and the Pi a Bluetooth speaker for the phone, with nobody logged in (PipeWire /
+WirePlumber config, a pairing tool, a reconnect service).
+
 ### Known to work: 2014 Infiniti Q60 (Clarion X9U6)
 
 Plays music from a Pi 5 with the defaults (full speed, `hid_desc=default`, no module options) and

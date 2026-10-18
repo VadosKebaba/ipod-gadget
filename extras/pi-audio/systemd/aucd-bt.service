@@ -1,0 +1,12 @@
+[Unit]
+Description=AUCD Bluetooth speaker: adapter name, no visibility, reconnect to the trusted phone
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+ExecStart=/usr/local/bin/aucd-bt autoconnect
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

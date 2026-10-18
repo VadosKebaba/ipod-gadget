@@ -1,0 +1,122 @@
+#!/bin/bash
+# aucd-audio-check (ipod-gadget extras/pi-audio): is everything in place for the car?
+# Run with sudo (or as the PipeWire user). Prints OK / WARN / FAIL lines; exit 1 on a FAIL.
+U=$(cat /var/lib/aucd-audio/user 2>/dev/null || echo "${SUDO_USER:-$USER}")
+UIDN=$(id -u "$U" 2>/dev/null) || { echo "no user $U"; exit 2; }
+F=0; W=0
+ok()   { echo "  OK    $*"; }
+warn() { echo "  WARN  $*"; W=$((W+1)); }
+bad()  { echo "  FAIL  $*"; F=$((F+1)); }
+info() { echo "        $*"; }
+asuser() {
+	if [ "$(id -u)" = "$UIDN" ]; then
+		env XDG_RUNTIME_DIR=/run/user/$UIDN "$@"
+	elif [ "$(id -u)" = 0 ]; then
+		runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/$UIDN "$@"
+	else
+		echo "run as root or as $U" >&2; exit 2
+	fi
+}
+
+echo "== ipod-gadget"
+if [ -e /sys/module/g_ipod_audio/parameters/streaming ]; then
+	ok "g_ipod_audio keeps time on its own when the car takes no audio"
+	info "car taking audio right now: $(cat /sys/module/g_ipod_audio/parameters/streaming) (Y only while the head unit plays the iPod source)"
+elif lsmod | grep -q '^g_ipod_audio'; then
+	bad "g_ipod_audio is an old build: update ipod-gadget (install-rpi.sh) and reboot"
+else
+	bad "g_ipod_audio not loaded"
+fi
+grep -q 'iPodUSB' /proc/asound/cards 2>/dev/null && ok "ALSA card iPodUSB" || bad "no ALSA card iPodUSB"
+[ -e /etc/modprobe.d/ipod-gadget-desk.conf ] && warn "desk mode is on: 'sudo ipod-desk-mode off' before the car"
+ST=/proc/asound/iPodUSB/pcm0p/sub0
+if grep -q 'state: RUNNING' $ST/status 2>/dev/null; then
+	ok "iPodUSB PCM running (silence flows when nothing plays)"
+else
+	bad "iPodUSB PCM not running ($(grep state: $ST/status 2>/dev/null || cat $ST/status 2>/dev/null))"
+fi
+grep -q '^rate: 44100' $ST/hw_params 2>/dev/null && ok "iPodUSB opened at 44100 Hz" || info "hw_params: $(tr '\n' ' ' < $ST/hw_params 2>/dev/null)"
+
+echo "== PipeWire for $U (no login needed)"
+[ "$(loginctl show-user "$U" -p Linger --value 2>/dev/null)" = yes ] && ok "linger on: $U's services start at boot" || bad "linger off: sudo loginctl enable-linger $U"
+for u in pipewire wireplumber pipewire-pulse; do
+	s=$(systemctl --user -M "$U@" is-active $u 2>/dev/null)
+	[ "$s" = active ] && ok "$u running" || bad "$u: ${s:-unknown}"
+done
+id -nG "$U" | grep -qw audio && ok "$U in group audio" || bad "$U not in group audio (no ALSA access without a login)"
+DEF=$(asuser pactl get-default-sink 2>/dev/null)
+case "$DEF" in
+*snd_usb_ipod*) ok "default speaker: $DEF" ;;
+"") bad "no default speaker (PipeWire not reachable?)" ;;
+*) bad "default speaker is $DEF, not the iPod output" ;;
+esac
+SINK=$(asuser pactl list sinks 2>/dev/null | awk -v RS= '/Name: [^\n]*snd_usb_ipod/')
+if [ -n "$SINK" ]; then
+	state=$(echo "$SINK" | awk '/State:/{print $2}')
+	case "$state" in RUNNING|IDLE) ok "iPod output state $state" ;; *) bad "iPod output state $state (suspended?)" ;; esac
+	spec=$(echo "$SINK" | sed -n 's/.*Sample Specification: //p')
+	[ "$spec" = "s16le 2ch 44100Hz" ] && ok "iPod output format $spec" || warn "iPod output format $spec"
+	vol=$(asuser wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)
+	case "$vol" in
+	"Volume: 1.00") ok "iPod output volume 100 % (the car's knob sets the loudness)" ;;
+	*) warn "iPod output $vol: as $U, wpctl set-volume @DEFAULT_AUDIO_SINK@ 1.0; wpctl set-mute @DEFAULT_AUDIO_SINK@ 0" ;;
+	esac
+fi
+RATE=$(asuser pw-metadata -n settings 0 clock.rate 2>/dev/null | sed -n "s/.*value:'\([0-9]*\)'.*/\1/p" | head -1)
+[ -z "$RATE" ] && RATE=$(asuser pw-dump 2>/dev/null | grep -m1 '"default.clock.rate"' | tr -dc 0-9)
+[ "$RATE" = 44100 ] && ok "graph rate 44100" || warn "graph rate ${RATE:-unknown}"
+TOP=$(asuser timeout 5 pw-top -b -n 2 2>/dev/null | grep 'snd_usb_ipod' | tail -1)
+if [ -n "$TOP" ]; then
+	if echo "$TOP" | grep -q '+ alsa_output'; then
+		warn "the iPod output follows another driver: $(echo "$TOP" | tr -s ' ')"
+	else
+		ok "the iPod output drives the graph (its errors so far: $(echo "$TOP" | awk '{print $9}'))"
+	fi
+fi
+
+echo "== Bluetooth"
+for s in bluetooth aucd-bt; do
+	[ "$(systemctl is-active $s)" = active ] && ok "$s.service running" || bad "$s.service: $(systemctl is-active $s)"
+done
+if command -v aucd-bt > /dev/null; then
+	aucd-bt status 2>&1 | sed 's/^/        /'
+fi
+
+echo "== Wi-Fi hotspot and Bluetooth share the radio"
+if command -v nmcli > /dev/null; then
+	nmcli -t -f NAME,TYPE con show --active 2>/dev/null | while IFS=: read -r name type; do
+		[ "$type" = 802-11-wireless ] || continue
+		mode=$(nmcli -g 802-11-wireless.mode con show "$name" 2>/dev/null)
+		band=$(nmcli -g 802-11-wireless.band con show "$name" 2>/dev/null)
+		chan=$(nmcli -g 802-11-wireless.channel con show "$name" 2>/dev/null)
+		if [ "$mode" = ap ]; then
+			if [ "$band" = a ]; then
+				echo "  OK    hotspot \"$name\" on 5 GHz (channel $chan): no airtime shared with Bluetooth"
+			else
+				echo "  WARN  hotspot \"$name\" on 2.4 GHz (band '${band:-auto}', channel ${chan:-auto}): shares airtime with Bluetooth audio; see README to move it to 5 GHz"
+			fi
+		else
+			echo "        Wi-Fi \"$name\" ($mode, band ${band:-auto})"
+		fi
+	done
+fi
+
+echo "== Power"
+if command -v vcgencmd > /dev/null; then
+	t=$(vcgencmd get_throttled | cut -d= -f2)
+	if [ "$t" = 0x0 ]; then
+		ok "get_throttled 0x0: no undervoltage or throttling since boot"
+	else
+		v=$((t))
+		why=""
+		[ $((v & 0x1)) -ne 0 ] && why="$why undervoltage-now"
+		[ $((v & 0x4)) -ne 0 ] && why="$why throttled-now"
+		[ $((v & 0x10000)) -ne 0 ] && why="$why undervoltage-since-boot"
+		[ $((v & 0x40000)) -ne 0 ] && why="$why throttled-since-boot"
+		warn "get_throttled $t:$why (check the 5 V supply)"
+	fi
+fi
+
+echo
+echo "$F fail, $W warn"
+[ $F -eq 0 ]

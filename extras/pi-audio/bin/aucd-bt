@@ -44,6 +44,7 @@ DEVICE = "org.bluez.Device1"
 TRANSPORT = "org.bluez.MediaTransport1"
 PROPS = "org.freedesktop.DBus.Properties"
 A2DP_SOURCE = "0000110a-0000-1000-8000-00805f9b34fb"  # the phone's end of A2DP
+A2DP_SINK = "0000110b-0000-1000-8000-00805f9b34fb"  # ours: offered once PipeWire is up
 PAIRING_LOCK = "/run/aucd-bt-pairing"  # while a window is open, the daemon leaves the adapter alone
 LAST_FILE = "/var/lib/aucd-audio/last-phone"
 AGENT_PATH = "/aucd/agent"
@@ -253,7 +254,7 @@ def cmd_autoconnect(args):
     bus = dbus.SystemBus()
     loop = GLib.MainLoop()
     started = time.monotonic()
-    state = {"adapter": None, "busy": False, "connected": None, "failed": {}}
+    state = {"adapter": None, "busy": False, "connected": None, "failed": {}, "sink": None}
 
     def lock_active():
         try:
@@ -286,6 +287,14 @@ def cmd_autoconnect(args):
                 return
             if not objs[adapter][ADAPTER].get("Powered"):
                 set_prop(bus, adapter, ADAPTER, "Powered", True)
+                return
+            # nothing to connect to before PipeWire registers the A2DP sink (15-20 s after
+            # boot): an attempt fails with br-connection-profile-unavailable meanwhile
+            sink = A2DP_SINK in [str(u).lower() for u in objs[adapter][ADAPTER].get("UUIDs", [])]
+            if sink != state["sink"]:
+                state["sink"] = sink
+                log("speaker (A2DP sink) offered: %s" % ("yes" if sink else "not yet, waiting for PipeWire"))
+            if not sink:
                 return
             phones = [(p, d) for p, d in devices(objs, adapter)
                       if d.get("Paired") and d.get("Trusted") and is_phone(d)]
@@ -334,7 +343,8 @@ def cmd_autoconnect(args):
         def err_connect(e):
             # the phone is not around, or refuses: logged when the reasons change (not on
             # every attempt: every 3 s at first), then the next phone
-            note("Connect", e)
+            if e is not None:
+                note("Connect", e)
             reasons = "; ".join(attempt)
             if state["failed"].get(address) != reasons:
                 state["failed"][address] = reasons
@@ -343,11 +353,17 @@ def cmd_autoconnect(args):
 
         def err_profile(e):
             note("ConnectProfile(A2DP)", e)
+            if props.get("UUIDs"):
+                # a plain Connect may go over LE and hang until the timeout: not for a
+                # phone whose A2DP service is known
+                err_connect(None)
+                return
             device.Connect(reply_handler=ok, error_handler=err_connect, timeout=25)
 
-        # the A2DP profile first: a plain Connect lets BlueZ pick the bearer, and for an
-        # iPhone (always advertising over LE) it may pick LE, which carries no audio and
-        # fails: "le-connection-abort-by-local" (seen on the Pi, 2026-10-18)
+        # the A2DP profile: a plain Connect lets BlueZ pick the bearer, and for an iPhone
+        # (always advertising over LE) it may pick LE, which carries no audio and fails
+        # ("le-connection-abort-by-local") or hangs (seen on the Pi, 2026-10-18). Plain
+        # Connect only for a device whose services aren't known yet
         device.ConnectProfile(A2DP_SOURCE, reply_handler=ok, error_handler=err_profile, timeout=25)
 
     def schedule():

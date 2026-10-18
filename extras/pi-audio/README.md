@@ -78,7 +78,8 @@ on the Pi is invisible again and refuses new pairings; the phone is trusted and
 `aucd-bt.service` connects to it whenever it is around (every 3 s for the first 2 minutes
 after boot, every 10 s up to 5 minutes, then every minute), asking for the A2DP profile so
 the connection is classic Bluetooth: a plain connect to an iPhone may go over Bluetooth LE
-and fail (`le-connection-abort-by-local`). Failed attempts are logged with their reason
+and fail (`le-connection-abort-by-local`) or hang. It starts once PipeWire offers the A2DP
+sink (15–20 s after boot); before that every attempt fails. Failed attempts are logged with their reason
 (`journalctl -u aucd-bt`), once per reason. `aucd-bt status` shows the adapter, the phone and the codec.
 
 If the phone was paired before and "forgot" the Pi: `sudo aucd-bt forget <address>` (from

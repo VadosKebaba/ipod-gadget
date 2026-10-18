@@ -211,6 +211,12 @@ IPOD_GLOBAL_ARGS="--lenient-auth"
 - 2026-10-18: Level 3 (AVRCP bridge) on `level3-wip` of both repos, not yet in the car:
   see *The car's controls* below and [../extras/pi-audio/README.md](../extras/pi-audio/README.md).
 
+- 2026-10-18: first Level 3 car run: next/previous, the screen's play/pause, names and timer
+  work; every toggle arrived with the car taking audio (the guard never acted); returning
+  to the iPod source sends a toggle and the phone starts, as with a real iPod (kept). The
+  car enables the 1-byte PlayStatusChangeNotifications and sends GetArtworkFormats on every
+  connect. Level 4 step 1 (`--artwork=test`) on `level3-wip`, not yet in the car.
+
 ## The car's controls (Level 2 logs, 2026-10-18)
 
 What the X9U6 sends over the Extended Remote lingo, from the client's journal:

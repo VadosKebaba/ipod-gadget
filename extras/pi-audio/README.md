@@ -339,3 +339,40 @@ cd ~/ipod && git fetch --tags && git checkout q60-level2-good && cd ~/ipod-gadge
 **To verify on the Pi:** the real BlueZ and iPhone (the property types, AVRCP's track numbers,
 how fast the iPhone reports changes), and a long Cyrillic title through the real gadget (a
 multi-report iPod→car frame; the QEMU fakecar test of the previous sessions wasn't rerun).
+
+## Level 4, step 1: album art (a test picture)
+
+The X9U6 asks for artwork formats on every connect. The client can now offer album art: for
+now **one picture for every track** (the phone doesn't send covers over Bluetooth here yet:
+BlueZ shows no `ImgHandle`), to find out whether and how the car shows it. Off unless
+`--artwork` is given.
+
+```bash
+cd ~/ipod && git pull --ff-only && CGO_ENABLED=0 go build -o /tmp/ipod ./cmd/ipod && \
+  sudo install -m 755 /tmp/ipod /usr/local/bin/ipod
+sudoedit /etc/default/ipod-client   # add --artwork=test, e.g.
+                                    # IPOD_GLOBAL_ARGS="--lenient-auth --toggle-guard=false --artwork=test"
+sudo systemctl restart ipod-client
+journalctl -u ipod-client -b | grep -E 'player:' | tail -1   # ... artwork test 565le, format 1 128x128, format 2 240x240
+```
+
+In the car, on the iPod screen, look for a square: **red top left, green top right, blue
+bottom left, white bottom right**, in a thin black frame.
+
+- **Right colours:** the car side works. A real picture instead:
+  `--artwork=/var/lib/ipod/cover.jpg` (a PNG or JPEG, full path; cropped to a square,
+  scaled down). A wrong path or a file that isn't a picture only costs the picture: the
+  client logs `--artwork: ...: no artwork` and runs on as before.
+- **Wrong colours** (e.g. red and blue swapped, or noise): `--artwork-pixel=565be`.
+- **Mirrored or rotated:** tell me which way.
+- **Nothing:** send the log; it shows what the car asked for (`GetTrackArtworkData`,
+  `GetTrackArtworkTimes`, `GetIndexedPlayingTrackInfo`) and `artwork: sent ... in ... ms`.
+
+A picture takes about 0.6 s (128×128) or 2 s (240×240) to send, logged each time; the car
+picks the size. Off again: take `--artwork=...` out and restart.
+
+```bash
+journalctl -u ipod-client -b --no-pager | grep -E 'Artwork|artwork|TrackInfo' > ~/level4.log; wc -l ~/level4.log
+```
+
+Step 2, the phone's own covers, needs AVRCP cover art from BlueZ (or a lookup online).

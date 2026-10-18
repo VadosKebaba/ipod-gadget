@@ -75,8 +75,11 @@ sudo aucd-bt pair
 For 120 s the Pi is visible as **AUCD**: on the iPhone, Settings > Bluetooth > AUCD. No
 code to type. The window closes as soon as the phone is paired and connected, and from then
 on the Pi is invisible again and refuses new pairings; the phone is trusted and
-`aucd-bt.service` connects to it whenever it is around (every 10 s for the first 3 minutes
-after boot, then every minute). `aucd-bt status` shows the adapter, the phone and the codec.
+`aucd-bt.service` connects to it whenever it is around (every 3 s for the first 2 minutes
+after boot, every 10 s up to 5 minutes, then every minute), asking for the A2DP profile so
+the connection is classic Bluetooth: a plain connect to an iPhone may go over Bluetooth LE
+and fail (`le-connection-abort-by-local`). Failed attempts are logged with their reason
+(`journalctl -u aucd-bt`), once per reason. `aucd-bt status` shows the adapter, the phone and the codec.
 
 If the phone was paired before and "forgot" the Pi: `sudo aucd-bt forget <address>` (from
 `aucd-bt status`), then pair again.

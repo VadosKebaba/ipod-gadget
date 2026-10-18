@@ -7,8 +7,9 @@
                                is paired and connected, or when the time is up
   aucd-bt autoconnect          the daemon behind aucd-bt.service: names the adapter, keeps it
                                invisible and not pairable, and connects to the trusted phone
-                               whenever it is around (every 10 s for the first 3 minutes after
-                               start, then every 60 s)
+                               whenever it is around (every 3 s for the first 2 minutes after
+                               start, every 10 s up to 5 minutes, then every 60 s; the A2DP
+                               profile first, so an iPhone is never tried over LE)
   aucd-bt status               adapter, paired devices, connection and codec
   sudo aucd-bt forget ADDRESS  unpair a device
 
@@ -252,7 +253,7 @@ def cmd_autoconnect(args):
     bus = dbus.SystemBus()
     loop = GLib.MainLoop()
     started = time.monotonic()
-    state = {"adapter": None, "busy": False, "connected": None}
+    state = {"adapter": None, "busy": False, "connected": None, "failed": {}}
 
     def lock_active():
         try:
@@ -315,20 +316,45 @@ def cmd_autoconnect(args):
         path, props = phones[i]
         state["busy"] = True
 
+        address = str(props.get("Address"))
+        device = dbus.Interface(bus.get_object(BLUEZ, path), DEVICE)
+
+        attempt = []
+
         def ok():
             state["busy"] = False
-            remember_phone(str(props.get("Address")))
+            state["failed"].pop(address, None)
+            remember_phone(address)
 
-        def err(e):
-            # the phone is not around, or refuses: try the next one
+        def note(how, e):
+            reason = "%s: %s" % (how, e.get_dbus_name() if hasattr(e, "get_dbus_name") else e)
+            msg = e.get_dbus_message() if hasattr(e, "get_dbus_message") else ""
+            attempt.append(reason + (" " + msg if msg else ""))
+
+        def err_connect(e):
+            # the phone is not around, or refuses: logged when the reasons change (not on
+            # every attempt: every 3 s at first), then the next phone
+            note("Connect", e)
+            reasons = "; ".join(attempt)
+            if state["failed"].get(address) != reasons:
+                state["failed"][address] = reasons
+                log("connect %s (%s) failed: %s" % (name_of(props), address, reasons))
             try_connect(phones, i + 1)
 
-        dbus.Interface(bus.get_object(BLUEZ, path), DEVICE).Connect(
-            reply_handler=ok, error_handler=err, timeout=25)
+        def err_profile(e):
+            note("ConnectProfile(A2DP)", e)
+            device.Connect(reply_handler=ok, error_handler=err_connect, timeout=25)
+
+        # the A2DP profile first: a plain Connect lets BlueZ pick the bearer, and for an
+        # iPhone (always advertising over LE) it may pick LE, which carries no audio and
+        # fails: "le-connection-abort-by-local" (seen on the Pi, 2026-10-18)
+        device.ConnectProfile(A2DP_SOURCE, reply_handler=ok, error_handler=err_profile, timeout=25)
 
     def schedule():
         tick()
-        interval = 10 if time.monotonic() - started < 180 else 60
+        # eager while the phone is most likely just arriving (the car starting), then calmer
+        up = time.monotonic() - started
+        interval = 3 if up < 120 else 10 if up < 300 else 60
         GLib.timeout_add_seconds(interval, schedule)
         return False
 

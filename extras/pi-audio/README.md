@@ -356,6 +356,11 @@ sudo systemctl restart ipod-client
 journalctl -u ipod-client -b | grep -E 'player:' | tail -1   # ... artwork test 565le, format 1 128x128, format 2 240x240
 ```
 
+First car test (2026-10-18): the car shows the art, colours and orientation right, but it
+keeps only the first USB report of each picture packet, so the first client build drew thin
+diagonal stripes on junk. The client now sends one report per packet (`--artwork-chunk` to
+override); update the client if the square comes out striped.
+
 In the car, on the iPod screen, look for a square: **red top left, green top right, blue
 bottom left, white bottom right**, in a thin black frame.
 

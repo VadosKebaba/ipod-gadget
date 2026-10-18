@@ -16,6 +16,10 @@
 #include <linux/types.h>
 #include <linux/poll.h>
 #include <linux/kfifo.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
+#include <linux/version.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -33,6 +37,21 @@
 
 #define NUM_USB_AUDIO_TRANSFERS 4
 #define MAX_USB_AUDIO_PACKET_SIZE 180
+
+#define IPOD_AUDIO_RATE 44100
+#define IPOD_AUDIO_FRAME_BYTES 4
+
+// The head unit's isochronous requests are the PCM's clock. When they stop (nothing
+// plugged in, key off, streaming interface at alt 0, bus suspended, or the head unit just
+// stops polling) the PCM carries on with the system clock and the samples are dropped,
+// like a sound card with nothing plugged into it: otherwise the buffer never empties and
+// the player (PipeWire with everything behind it, or mpg123) blocks.
+#define SYSCLK_TICK_NS (5 * NSEC_PER_MSEC)
+#define ISO_IDLE_NS (20 * NSEC_PER_MSEC)
+
+static bool streaming;
+module_param(streaming, bool, 0444);
+MODULE_PARM_DESC(streaming, "Y while the head unit has the audio streaming interface at alt 1 (read only)");
 
 #include "ipod.h"
 
@@ -56,6 +75,13 @@ struct ipod_audio {
 	void *rbuf;
 
 	spinlock_t play_lock;
+	u64 pos;		// bytes consumed since the stream started; hw_ptr = pos % dma_bytes
+	u64 period_signalled;	// pos / period_size at the last snd_pcm_period_elapsed()
+	ktime_t sysclk_time;	// on the system clock: pos is up to date at this time
+	ktime_t last_iso;	// last isochronous completion
+	bool on_sysclk;		// the system clock runs the PCM
+	bool running;
+	struct hrtimer sysclk;
 
 	struct usb_ep *in_ep;
 	bool in_ep_enabled;
@@ -94,10 +120,7 @@ static int ipod_audio_pcm_open(struct snd_pcm_substream *substream)
 	runtime->hw = ipod_audio_hw;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-	{
-		spin_lock_init(&audio->play_lock);
 		audio->cnt = 0;
-	}
 
 	snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
 
@@ -132,6 +155,7 @@ static int ipod_audio_pcm_hw_params(struct snd_pcm_substream *substream,
 static int ipod_audio_pcm_hw_free(struct snd_pcm_substream *substream)
 {
 	struct ipod_audio *audio = snd_pcm_substream_chip(substream);
+	hrtimer_cancel(&audio->sysclk);
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 	{
 		audio->dma_bytes = 0;
@@ -140,6 +164,79 @@ static int ipod_audio_pcm_hw_free(struct snd_pcm_substream *substream)
 	}
 
 	return snd_pcm_lib_free_pages(substream);
+}
+
+// Under play_lock.
+static void ipod_audio_advance(struct ipod_audio *audio, unsigned int bytes)
+{
+	u32 rem;
+
+	audio->pos += bytes;
+	div_u64_rem(audio->pos, audio->dma_bytes, &rem);
+	audio->hw_ptr = rem;
+}
+
+// Under play_lock: whether a period ended since the last time it said so.
+static bool ipod_audio_period_due(struct ipod_audio *audio)
+{
+	u64 period = div_u64(audio->pos, audio->period_size);
+
+	if (period == audio->period_signalled)
+		return false;
+	audio->period_signalled = period;
+	return true;
+}
+
+// Under play_lock: unless the head unit is taking audio, consume what the time since
+// sysclk_time is worth at 44.1 kHz.
+static void ipod_audio_sysclk_update(struct ipod_audio *audio, ktime_t now)
+{
+	s64 elapsed;
+	u64 frames;
+
+	if (ktime_to_ns(ktime_sub(now, audio->last_iso)) < ISO_IDLE_NS)
+		return;
+	if (!audio->on_sysclk) {
+		// the head unit just stopped taking audio: carry on from now, without making up for
+		// the time it has been quiet (a sudden jump could empty the player's buffer)
+		audio->on_sysclk = true;
+		audio->sysclk_time = now;
+		return;
+	}
+	elapsed = ktime_to_ns(ktime_sub(now, audio->sysclk_time));
+	if (elapsed <= 0)
+		return;
+	frames = div_u64((u64)elapsed * IPOD_AUDIO_RATE, NSEC_PER_SEC);
+	if (!frames)
+		return;
+	audio->sysclk_time = ktime_add_ns(audio->sysclk_time,
+		div_u64(frames * NSEC_PER_SEC, IPOD_AUDIO_RATE));
+	ipod_audio_advance(audio, frames * IPOD_AUDIO_FRAME_BYTES);
+}
+
+static enum hrtimer_restart ipod_audio_sysclk_tick(struct hrtimer *timer)
+{
+	struct ipod_audio *audio = container_of(timer, struct ipod_audio, sysclk);
+	struct snd_pcm_substream *substream;
+	unsigned long flags;
+	bool update_alsa;
+
+	spin_lock_irqsave(&audio->play_lock, flags);
+	if (!audio->running) {
+		spin_unlock_irqrestore(&audio->play_lock, flags);
+		return HRTIMER_NORESTART;
+	}
+	ipod_audio_sysclk_update(audio, ktime_get());
+	update_alsa = ipod_audio_period_due(audio);
+	substream = audio->ss;
+	spin_unlock_irqrestore(&audio->play_lock, flags);
+
+	// a stream stopped in the meantime is ignored by snd_pcm_period_elapsed()
+	if (update_alsa && substream)
+		snd_pcm_period_elapsed(substream);
+
+	hrtimer_forward_now(timer, ns_to_ktime(SYSCLK_TICK_NS));
+	return HRTIMER_RESTART;
 }
 
 static int ipod_audio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
@@ -152,16 +249,27 @@ static int ipod_audio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	/* Reset */
 	audio->hw_ptr = 0;
+	audio->pos = 0;
+	audio->period_signalled = 0;
 
 	switch (cmd)
 	{
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 		audio->ss = substream;
+		audio->sysclk_time = ktime_get();
+		// the system clock runs the PCM until an isochronous request completes
+		audio->last_iso = ktime_sub_ns(audio->sysclk_time, ISO_IDLE_NS);
+		audio->on_sysclk = true;
+		audio->running = true;
+		hrtimer_start(&audio->sysclk, ns_to_ktime(SYSCLK_TICK_NS), HRTIMER_MODE_REL_SOFT);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 		audio->ss = NULL;
+		audio->running = false;
+		// a tick that is running sees !running and stops; sync_stop/hw_free wait for it
+		hrtimer_try_to_cancel(&audio->sysclk);
 		break;
 	default:
 		err = -EINVAL;
@@ -179,8 +287,27 @@ static int ipod_audio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 static snd_pcm_uframes_t ipod_audio_pcm_hw_pointer(struct snd_pcm_substream *substream)
 {
 	struct ipod_audio *audio = snd_pcm_substream_chip(substream);
-	return bytes_to_frames(substream->runtime, audio->hw_ptr);
+	unsigned long flags;
+	ssize_t hw_ptr;
+
+	// on the system clock the position moves between ticks too; the period this may end
+	// is signalled by the next tick
+	spin_lock_irqsave(&audio->play_lock, flags);
+	if (audio->running)
+		ipod_audio_sysclk_update(audio, ktime_get());
+	hw_ptr = audio->hw_ptr;
+	spin_unlock_irqrestore(&audio->play_lock, flags);
+	return bytes_to_frames(substream->runtime, hw_ptr);
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
+static int ipod_audio_pcm_sync_stop(struct snd_pcm_substream *substream)
+{
+	struct ipod_audio *audio = snd_pcm_substream_chip(substream);
+	hrtimer_cancel(&audio->sysclk);
+	return 0;
+}
+#endif
 
 static int ipod_audio_pcm_null(struct snd_pcm_substream *substream)
 {
@@ -197,6 +324,9 @@ static struct snd_pcm_ops ipod_audio_pcm_ops = {
 	.trigger = ipod_audio_pcm_trigger,
 	.pointer = ipod_audio_pcm_hw_pointer,
 	.prepare = ipod_audio_pcm_null,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
+	.sync_stop = ipod_audio_pcm_sync_stop,
+#endif
 };
 
 static void ipod_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
@@ -249,13 +379,11 @@ static void ipod_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
 	}
 	audio->cnt = (audio->cnt + 1) % 10;
 
-	pending = audio->hw_ptr % audio->period_size;
-	pending += req->actual;
-	if (pending >= audio->period_size)
-		update_alsa = true;
-
 	hw_ptr = audio->hw_ptr;
-	audio->hw_ptr = (audio->hw_ptr + req->actual) % audio->dma_bytes;
+	audio->last_iso = ktime_get();
+	audio->on_sysclk = false;
+	ipod_audio_advance(audio, req->actual);
+	update_alsa = ipod_audio_period_due(audio);
 
 	spin_unlock_irqrestore(&audio->play_lock, flags);
 
@@ -348,6 +476,7 @@ static int ipod_audio_start(struct ipod_audio* audio) {
 		return 0;
 	}
 	audio->in_ep_enabled = true;
+	streaming = true;
 	ret = config_ep_by_speed(audio->func.config->cdev->gadget, &audio->func, audio->in_ep);
 	if (ret)
 	{
@@ -395,6 +524,7 @@ static int ipod_audio_stop(struct ipod_audio* audio) {
 		return 0;
 	}
 	audio->in_ep_enabled = false;
+	streaming = false;
 	for (i = 0; i < NUM_USB_AUDIO_TRANSFERS; i++) {
 		if(audio->in_req[i]) {
 			usb_ep_dequeue(audio->in_ep, audio->in_req[i]);
@@ -548,6 +678,10 @@ static int ipod_audio_bind(struct usb_configuration *conf, struct usb_function *
 		DBG(conf->cdev, "Coudn't create audio card: %d", ret);
 		goto pdev_fail;
 	}
+	// what PipeWire / PulseAudio show as the device's name
+	snprintf(audio->card->driver, sizeof(audio->card->driver), "iPodUSB");
+	snprintf(audio->card->shortname, sizeof(audio->card->shortname), "iPod USB");
+	snprintf(audio->card->longname, sizeof(audio->card->longname), "iPod USB audio (ipod-gadget)");
 
 	ret = snd_pcm_new(audio->card, "iPod PCM", 0, 1, 0, &audio->pcm);
 	if (ret)
@@ -592,6 +726,7 @@ static void ipod_audio_unbind(struct usb_configuration *conf, struct usb_functio
 		audio->pcm = NULL;
 		audio->pdev = NULL;
 	}
+	hrtimer_cancel(&audio->sysclk);
 
 	for (i = 0; i < NUM_USB_AUDIO_TRANSFERS; i++)
 	{
@@ -626,6 +761,13 @@ static struct usb_function *ipod_audio_alloc(struct usb_function_instance *fi)
 
 
 	audio->func.name = "ipod_audio";
+	spin_lock_init(&audio->play_lock);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,13,0)
+	hrtimer_setup(&audio->sysclk, ipod_audio_sysclk_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+#else
+	hrtimer_init(&audio->sysclk, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+	audio->sysclk.function = ipod_audio_sysclk_tick;
+#endif
 	audio->func.bind = ipod_audio_bind;
 	audio->func.unbind = ipod_audio_unbind;
 	audio->func.set_alt = ipod_audio_set_alt;

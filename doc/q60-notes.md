@@ -205,3 +205,44 @@ IPOD_GLOBAL_ARGS="--lenient-auth"
   invalidates tests #3–#5; `tools/hid-desc-check.c`. Client play state and
   notifications (2998f7d). Next car run: current pi5-support heads of both repos with
   `--lenient-auth`.
+- 2026-10-18: Level 2 in the car (tag `q60-level2-good`): iPhone → A2DP (SBC) → PipeWire →
+  gadget → X9U6 → Bose, end to end. The power problem was the power bank browning out;
+  fixed with a 12 V → 5 V 3 A supply.
+- 2026-10-18: Level 3 (AVRCP bridge) on `level3-wip` of both repos, not yet in the car:
+  see *The car's controls* below and [../extras/pi-audio/README.md](../extras/pi-audio/README.md).
+
+## The car's controls (Level 2 logs, 2026-10-18)
+
+What the X9U6 sends over the Extended Remote lingo, from the client's journal:
+
+- **Next / previous:** PlayControl 3 / 4 (steering wheel up/down, head unit buttons).
+- **Pause / resume:** only PlayControl 1 (toggle), never 10 (play) or 11 (pause): from the
+  iPod screen's play/pause button, the steering-wheel joystick push while play/pause is
+  highlighted, and **automatically when leaving or returning to the iPod source** (FM,
+  audio off).
+- While the client reports *paused*, the car stops taking audio (alt setting 0; the gadget
+  drops samples cleanly since Level 2, `streaming` reads `N`).
+
+Level 3 (VadosKebaba/ipod `level3-wip`) maps these onto the phone's AVRCP player through
+BlueZ: 3 / 8 / 12 → Next, 4 / 9 / 13 → Previous, 10 and 7 → Play, 11 and 2 → Pause, 5 / 6 →
+FastForward / Rewind, and toggle → Pause if the phone plays, else Play, decided from a fresh
+read of the phone. **Source-leave rule** (`--toggle-guard`, default on): a toggle while the
+car takes no audio may pause the phone but never starts it. Every PlayControl is logged with
+the car's streaming state and the phone's status before and after.
+
+Open questions for the first Level 3 car run (answers in the journal and the trace):
+
+- Does a toggle on *returning* to the source, or from the play button while paused, arrive
+  before or after the car takes audio again? If it arrives with `streaming N`, the guard
+  refuses to resume the phone from the car: then `--toggle-guard=false`, or a better rule
+  from the logged order.
+- Does the X9U6 enable PlayStatusChangeNotifications (`SetPlayStatusChangeNotification` in
+  the journal)? Without them it has to poll for track changes.
+- Does it keep titles by track index? The client shows a 4-track list with the current
+  track alternating between 2 and 3 when the phone gives no track numbers, so either way it
+  asks again.
+- What does its font do with Cyrillic and with long names (`--text`, `--text-max`)?
+- Level 4 (album art): GetColorDisplayImageLimits is the accessory asking for the *iPod's*
+  screen size (to upload a logo with SetDisplayImage); artwork to the car would be
+  GetArtworkFormats / GetTrackArtworkTimes / GetTrackArtworkData. Check whether it sends
+  those (the client answers GetArtworkFormats with an empty list today).

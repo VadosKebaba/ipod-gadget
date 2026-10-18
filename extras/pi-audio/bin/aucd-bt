@@ -12,11 +12,22 @@
   aucd-bt status               adapter, paired devices, connection and codec
   sudo aucd-bt forget ADDRESS  unpair a device
 
+The phone's player as the car sees it (Level 3, the iAP client's "ipod bt", with the
+client's IPOD_GLOBAL_ARGS from /etc/default/ipod-client):
+  aucd-bt now                  the phone, codec, status, track (as sent to the car), and what
+                               the car is told
+  aucd-bt next|prev|play|pause|toggle
+                               the car's PlayControl (3, 4, 10, 11, 1) through the client's own
+                               code, then the phone before and after; toggle never starts the
+                               phone while the car takes no audio (--toggle-guard)
+  aucd-bt watch                a line whenever what the car is told changes (ctrl-c to stop)
+
 Settings: /etc/default/aucd-audio (BT_NAME, BT_PAIR_SECONDS, BT_ADAPTER).
 """
 
 import glob
 import os
+import shlex
 import signal
 import sys
 import time
@@ -387,8 +398,37 @@ def cmd_forget(args):
     return 1
 
 
+IPOD = "/usr/local/bin/ipod"
+IPOD_DEFAULTS = "/etc/default/ipod-client"
+IPOD_BT = ("now", "next", "prev", "play", "pause", "toggle", "watch")
+
+
+def ipod_global_args():
+    # IPOD_GLOBAL_ARGS as ipod-client.service gets it (systemd EnvironmentFile: one quoted value)
+    try:
+        with open(IPOD_DEFAULTS) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("IPOD_GLOBAL_ARGS="):
+                    value = shlex.split(line.split("=", 1)[1])
+                    return shlex.split(value[0]) if value else []
+    except OSError:
+        pass
+    return []
+
+
+def cmd_ipod_bt(cmd, args):
+    if not os.access(IPOD, os.X_OK):
+        log("%s missing: install the iAP client (sudo bash ~/ipod-gadget/install-rpi.sh ~/ipod)" % IPOD)
+        return 2
+    argv = [IPOD] + ipod_global_args() + ["bt", cmd] + args
+    os.execv(IPOD, argv)
+
+
 def main():
     cmds = {"pair": cmd_pair, "autoconnect": cmd_autoconnect, "status": cmd_status, "forget": cmd_forget}
+    if len(sys.argv) >= 2 and sys.argv[1] in IPOD_BT:
+        return cmd_ipod_bt(sys.argv[1], sys.argv[2:])
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         print(__doc__.strip())
         return 2

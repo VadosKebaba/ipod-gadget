@@ -122,6 +122,10 @@ if [ -n "$client" ]; then
 #   IPOD_GLOBAL_ARGS="--hid=legacy"   with   options g_ipod_hid hid_desc=legacy
 # (--hid needs the VadosKebaba/ipod client; --legacy is the older spelling of --hid=legacy)
 # --lenient-auth accepts damaged certificate/signature packets from the head unit (any descriptor)
+# Level 3 (the phone over Bluetooth on the car's screen and buttons), defaults shown:
+#   --player=auto      the phone while one has a media player, else the stub; --player=stub: Level 2
+#   --text=asis        or --text=translit (Cyrillic in Latin letters); --text-max=200 (bytes)
+#   --toggle-guard     a toggle while the car takes no audio never starts the phone; =false: off
 IPOD_GLOBAL_ARGS=""
 EOF
 	fi

@@ -201,19 +201,141 @@ alone, the adapter coming back.
 Not tested yet: a real phone over Bluetooth (pairing, A2DP, reconnect), the hotspot running
 alongside, the Windows desk test, and 30 minutes in the car.
 
-## Next: AVRCP bridge (design)
+## Level 3: the phone on the car's screen and buttons (AVRCP bridge)
 
-BlueZ exposes the phone's player as `org.bluez.MediaPlayer1` (`Track`: Title, Artist,
-Album, Duration, TrackNumber, NumberOfTracks; `Status`, `Position`; `Play`, `Pause`,
-`Next`, `Previous`). The iAP client takes its play state from a `Player` (VadosKebaba/ipod,
-`cmd/ipod`); today that is `DevExtRemote`, a state of its own. A MediaPlayer1-backed
-Player would:
+Branch `level3-wip` of both repos. The iAP client (VadosKebaba/ipod) reads the phone's
+player from BlueZ (`org.bluez.MediaPlayer1`, AVRCP) and tells the car about it instead of
+its Level 2 stub:
 
-- answer GetPlayStatus from Status / Position / Duration and GetCurrentPlayingTrackIndex /
-  GetNumPlayingTracks from TrackNumber / NumberOfTracks;
-- send the car's PlayControl (steering wheel, head unit buttons) to Play / Pause / Next /
-  Previous on the phone;
-- give the car screen the real song through `extremote.DeviceTrackInfo`;
-- turn MediaPlayer1's property changes into PlayStatusChangeNotifications (track changed,
-  playing / paused / stopped, position);
-- fall back to `DevExtRemote` while no phone is connected.
+- the car's iPod screen shows the phone's **title, artist and album** (`--text=asis`, the
+  default, or `--text=translit` for Cyrillic in Latin letters; at most `--text-max` bytes,
+  default 200);
+- **playing / paused** and the **time** come from the phone (stopped is told as paused);
+- the car's **next / previous** (steering wheel, head unit) skip on the phone, **play /
+  pause** (the only one the X9U6 sends is toggle) play and pause the phone;
+- with **no phone** (none connected, or no media player on it) the Level 2 stub answers,
+  playing, as before; the switch either way is logged (`player: ...`).
+
+The car's requests are always answered from a cache, never by waiting for BlueZ. Every
+PlayControl from the car is logged with the car's streaming state and the phone's status
+before and after, then again 300 ms and 1.5 s later:
+
+```
+phone: PlayControl toggle (1): car streaming N, phone playing -> paused, action Pause (toggle, the phone plays)
+phone: after PlayControl toggle (1) +300ms: phone paused, car streaming N
+```
+
+**The source-leave rule** (`--toggle-guard`, on by default): the car sends a toggle when it
+leaves the iPod source (FM, audio off) and when it comes back. A toggle while the car takes
+no audio (`streaming N`) may pause the phone but never starts it, so leaving the source with
+the phone paused doesn't start it under the FM. Explicit play (10) is never blocked.
+**Watch for this in the car:** since the car stops taking audio while it's told *paused*, a
+resume from the car's own play/pause button may also arrive with `streaming N` and be
+refused (`action none (toggle while the car takes no audio never starts the phone)`). If
+that happens, `--toggle-guard=false` (below) makes every toggle follow the phone.
+
+Without track numbers from the phone the car sees a list of 4 with the current track at 2 or
+3, alternating on every track change (never at an end, so next and previous always work,
+and a car that keeps titles by index asks again). With the phone's numbers (`TrackNumber` of
+`NumberOfTracks`, at least 2) it sees those.
+
+### Install (needs internet once: the client now uses github.com/godbus/dbus/v5)
+
+```bash
+cd ~/ipod && git fetch origin && git checkout level3-wip && git pull --ff-only && go mod download
+cd ~/ipod-gadget && git fetch origin && git checkout level3-wip && git pull --ff-only
+cd ~/ipod && CGO_ENABLED=0 go build -o /tmp/ipod ./cmd/ipod && /tmp/ipod lingos > /dev/null && \
+  sudo install -m 755 /tmp/ipod /usr/local/bin/ipod
+sudo install -m 755 ~/ipod-gadget/extras/pi-audio/bin/aucd-bt /usr/local/bin/aucd-bt
+sudo systemctl restart ipod-client
+journalctl -u ipod-client -b | grep -E 'player:|phone:' | tail
+```
+
+(`sudo bash ~/ipod-gadget/install-rpi.sh ~/ipod && sudo bash
+~/ipod-gadget/extras/pi-audio/install.sh` does the same and more: it also rebuilds the
+kernel modules, which haven't changed.) `/etc/default/ipod-client` stays as it is:
+`IPOD_GLOBAL_ARGS="--lenient-auth"`; the new flags default to `--player=auto --text=asis
+--text-max=200 --toggle-guard`.
+
+### Desk test (phone connected over Bluetooth, no car needed)
+
+```bash
+aucd-bt status       # the phone Connected, audio: SBC active
+aucd-bt now          # phone, codec, playing, title/artist/album, "head unit: phone, ..."
+aucd-bt next         # the phone skips; "after:" shows the new title and track 3 of 4 (or n+1 of m)
+aucd-bt prev
+aucd-bt pause        # the phone pauses; "head unit: phone, paused"
+aucd-bt play         # it plays again
+aucd-bt toggle       # pauses (the phone plays)
+aucd-bt toggle       # without the car: "streaming N", so the guard refuses to start it:
+                     #   action none (toggle while the car takes no audio never starts the phone)
+aucd-bt watch        # change songs on the phone: a line each time, within a second; ctrl-c
+```
+
+Cyrillic on the car's font, without a phone (in the car, the stub answers with these names;
+systemd doesn't keep quotes in `IPOD_GLOBAL_ARGS`, so run it by hand):
+
+```bash
+sudo systemctl stop ipod-client
+sudo /usr/local/bin/ipod -d --lenient-auth --player=stub \
+  --demo-track "Группа крови — очень длинное название для проверки экрана|Кино|Группа крови" serve /dev/iap0
+# ctrl-c, then the same with --text=translit to compare; sudo systemctl start ipod-client after
+```
+
+### Car checklist
+
+Before the drive: `aucd-bt now` shows the phone, `journalctl -u ipod-client -f` in an SSH
+session if possible (or read it afterwards with `journalctl -u ipod-client -b`).
+
+1. iPod source: the car's screen shows the phone's title / artist / album, and the time
+   runs. Long or Cyrillic names: what does the screen show (font, cut)?
+2. Next / previous on the steering wheel and the head unit: the phone skips, the screen
+   follows within a second or two.
+3. Play/pause from the iPod screen and the joystick: the phone pauses, **and resumes**. If
+   resume does nothing, look for `action none (toggle while the car takes no audio ...)` in
+   the journal: then the guard is in the way (try `--toggle-guard=false`).
+4. Leave the source (FM), with the phone playing: the phone pauses. Come back: it resumes.
+   Leave with the phone **paused**: it must stay paused under FM. Note the streaming state
+   in each PlayControl line.
+5. Pause and change tracks from the phone itself: the car's screen follows.
+6. Turn the phone's Bluetooth off: the car keeps playing the Pi's audio from the stub
+   (`player: no phone player, the stub answers`), and back to the phone when it reconnects.
+7. Afterwards, send `journalctl -u ipod-client -b > level3-car.log` (and
+   `/var/lib/ipod/ipod-*.trace`): it answers the open questions: whether the car enables
+   PlayStatusChangeNotifications (`SetPlayStatusChangeNotification`), which track indexes it
+   asks for, whether it sends GetArtworkFormats / GetTrackArtwork*.
+
+### Rollback
+
+No code change needed, either:
+
+```bash
+# the stub again (Level 2 answers), keeping the new client
+sudoedit /etc/default/ipod-client      # IPOD_GLOBAL_ARGS="--lenient-auth --player=stub"
+sudo systemctl restart ipod-client
+# or keep the phone and only make toggles follow it: --toggle-guard=false
+```
+
+or back to exactly what ran in the car on 2026-10-18 (tag `q60-level2-good`, both repos):
+
+```bash
+cd ~/ipod && git fetch --tags && git checkout q60-level2-good && cd ~/ipod-gadget && git fetch --tags && git checkout q60-level2-good && sudo bash install-rpi.sh ~/ipod && sudo bash extras/pi-audio/install.sh && sudo reboot
+```
+
+### Tested (in a cloud VM, no Pi, car or iPhone)
+
+- Unit tests with a fake BlueZ: the switch between stub and phone and its notifications,
+  toggle decided from a fresh read (stale cache), the guard, the command mapping, the track
+  index rules, the position from a fake clock, the stale cache, the text modes and cap.
+- End to end through the client's frame loop: the car's PlayControl next reaches
+  `MediaPlayer1.Next`, GetIndexedPlayingTrackTitle / ArtistName answer the phone's names,
+  the track index moves.
+- `ipod bt now/next/prev/play/pause/toggle/watch` (linux/amd64) against python-dbusmock's
+  BlueZ with a hand-made iPhone player (`cmd/ipod/scripts/bt-dbusmock-test.py` in the
+  client): 16 checks; `watch` sees a track change 0.02 s after BlueZ's signal; no phone, the
+  phone disconnecting and bluetoothd gone all fall back to the stub.
+- Built for linux/arm64 (`CGO_ENABLED=0`); `go vet` and `go test -race` pass.
+
+**To verify on the Pi:** the real BlueZ and iPhone (the property types, AVRCP's track numbers,
+how fast the iPhone reports changes), and a long Cyrillic title through the real gadget (a
+multi-report iPod→car frame; the QEMU fakecar test of the previous sessions wasn't rerun).

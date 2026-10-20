@@ -10,7 +10,8 @@
                                whenever it is around (every 3 s for the first 2 minutes after
                                start, every 10 s up to 5 minutes, then every 60 s; the A2DP
                                profile first, so an iPhone is never tried over LE)
-  aucd-bt status               adapter, paired devices, connection and codec
+  aucd-bt status               adapter, paired devices, connection, codec and the delay
+                               reported to the phone
   sudo aucd-bt forget ADDRESS  unpair a device
 
 The phone's player as the car sees it (Level 3, the iAP client's "ipod bt", with the
@@ -419,6 +420,9 @@ def cmd_status(args):
             if TRANSPORT in ifs and p.startswith(path + "/"):
                 t = ifs[TRANSPORT]
                 codec = ", audio: %s %s" % (CODECS.get(int(t.get("Codec", 0xFF)), "?"), t.get("State"))
+                # A2DP delay reporting: what the Pi tells the phone (it delays video by it)
+                if "Delay" in t:
+                    codec += ", delay reported %.1f ms" % (int(t["Delay"]) / 10.0)
         log("  %s %s [%s]%s" % (d.get("Address"), name_of(d), " ".join(flags) or "-", codec))
     return 0
 

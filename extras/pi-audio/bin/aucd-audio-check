@@ -65,6 +65,9 @@ fi
 RATE=$(asuser pw-metadata -n settings 0 clock.rate 2>/dev/null | sed -n "s/.*value:'\([0-9]*\)'.*/\1/p" | head -1)
 [ -z "$RATE" ] && RATE=$(asuser pw-dump 2>/dev/null | grep -m1 '"default.clock.rate"' | tr -dc 0-9)
 [ "$RATE" = 44100 ] && ok "graph rate 44100" || warn "graph rate ${RATE:-unknown}"
+QMIN=$(asuser pw-metadata -n settings 0 clock.min-quantum 2>/dev/null | sed -n "s/.*value:'\([0-9]*\)'.*/\1/p" | head -1)
+info "graph cycle at least ${QMIN:-?} samples (512 = 11.6 ms with this setup); the delay: aucd-audio-diag latency"
+[ -e /etc/pipewire/pipewire.conf.d/90-aucd-diag.conf ] && warn "diagnostic logging is on: 'sudo aucd-audio-diag logs off' when done"
 TOP=$(asuser timeout 5 pw-top -b -n 2 2>/dev/null | grep 'snd_usb_ipod' | tail -1)
 if [ -n "$TOP" ]; then
 	if echo "$TOP" | grep -q '+ alsa_output'; then

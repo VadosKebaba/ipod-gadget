@@ -34,10 +34,10 @@ It installs (and keeps on update; running it again is the update):
 
 | What | Where |
 |---|---|
-| 44.1 kHz graph | `/etc/pipewire/pipewire.conf.d/50-aucd-ipod.conf` |
-| iPod output: default, always on, the graph's driver, 44.1 kHz S16 stereo | `/etc/wireplumber/wireplumber.conf.d/50-aucd-ipod.conf` |
+| 44.1 kHz graph, 512-sample cycle | `/etc/pipewire/pipewire.conf.d/50-aucd-ipod.conf` |
+| iPod output: default, always on, the graph's driver, 44.1 kHz S16 stereo, 1024 samples headroom | `/etc/wireplumber/wireplumber.conf.d/50-aucd-ipod.conf` |
 | Bluetooth: speaker only (A2DP sink), no hands-free, works with no login | `/etc/wireplumber/wireplumber.conf.d/51-aucd-bluetooth.conf` |
-| `aucd-bt` (pairing window, reconnect daemon), `aucd-audio-check`, `ipod-desk-mode` | `/usr/local/bin` |
+| `aucd-bt` (pairing window, reconnect daemon), `aucd-audio-check`, `aucd-audio-diag` (delay, hiccups), `ipod-desk-mode` | `/usr/local/bin` |
 | reconnect daemon | `aucd-bt.service` |
 | name and pairing window length | `/etc/default/aucd-audio` |
 
@@ -59,7 +59,7 @@ After a reboot, with nobody logged in, every line should be `OK`:
 - `linger on`, `pipewire / wireplumber / pipewire-pulse running`, `in group audio`
 - `default speaker: alsa_output.platform-snd_usb_ipod...`, `state IDLE` or `RUNNING`
   (never `SUSPENDED`), `format s16le 2ch 44100Hz`, `volume 100 %`
-- `graph rate 44100`, `the iPod output drives the graph`
+- `graph rate 44100`, `graph cycle at least 512 samples`, `the iPod output drives the graph`
 - `bluetooth.service`, `aucd-bt.service running`, then the adapter: name `AUCD`,
   `visible False, pairable False`, `speaker (A2DP sink) offered: yes`
 - hotspot band (see *Wi-Fi and Bluetooth*), `get_throttled 0x0`
@@ -135,6 +135,170 @@ sudo nmcli con up "<hotspot connection>"
 ```
 
 The second line drops every Wi-Fi client for a moment, an SSH session over the hotspot too.
+
+## Latency and start-up hiccups
+
+Reported after several drives (2026-10-18): one or a few breaks right after the start, then
+fine; and a constant delay of about 0.5 s. What follows comes from reading the source of
+the PipeWire on the Pi (1.4.2) and g_ipod_audio; **the numbers are to verify on the Pi**
+with the commands below.
+
+### Where the delay comes from
+
+| Stage | How much | What sets it | Measure |
+|---|---|---|---|
+| iPhone: encoder and send buffer | not visible from the Pi (iOS over A2DP: typically 100-200 ms, an estimate) | iOS | end to end, below |
+| Bluetooth jitter buffer (PipeWire's bluez5 decode buffer) | 20 ms on a quiet radio, more with a busy one (ceiling ~370 ms) | adaptive: 1.5 x the worst gap between the phone's packets in the last 2 minutes, at least one cycle, in 20 ms steps | `aucd-audio-diag latency` |
+| SBC decoding, resampling to the car's clock | 1-3 ms | | |
+| iPod output (ALSA) | one to two graph cycles of 11.6 ms + 23 ms headroom: 35-46 ms | `default.clock.quantum` (512; the phone's stream asks for 512 anyway), `api.alsa.headroom` | `delay:` in `/proc/asound/iPodUSB/pcm0p/sub0/status`; `pw-top` QUANT |
+| g_ipod_audio's USB queue | 4 ms | 4 requests of 1 ms | |
+| head unit | unknown, the same as with a real iPod | the Clarion | *Lip sync*, below |
+
+So the Pi's share is about 55 ms with a quiet radio, more with a busy one (a packet 60 ms
+late makes the jitter buffer 100 ms, for the next 2 minutes); the rest of the 0.5 s is the
+iPhone and the head unit. The ALSA buffer in `hw_params`
+(`buffer_size 16384`, 371 ms) is only the ceiling: PipeWire keeps about one cycle plus the
+headroom in it. The resampling is not a buffer: the phone's stream follows the car's clock
+by adjusting its rate, it adds a few samples.
+
+### What changed (2026-10-18)
+
+| Setting | Was | Now | Effect |
+|---|---|---|---|
+| `api.alsa.headroom` (wireplumber `50-aucd-ipod.conf`) | 1024 (23 ms) | 1024, kept (Vadym, 2026-10-19) | none; 512 would save 11.6 ms you can't hear, and the 1024 margin against a late cycle on a busy Pi stays |
+| `default.clock.quantum`, `min-quantum`, `max-quantum` (pipewire `50-aucd-ipod.conf`) | PipeWire's 1024 / 32 / 2048 | 512 / 512 / 512 | nothing while the phone plays (its stream asks for 512 anyway); the cycle no longer switches (from 1024 when idle, up to 2048 with a player on the Pi) when the phone starts or stops, and the Pi's own sounds get 512 too |
+| `latency.internal.ns` (wireplumber `50-aucd-ipod.conf`) | 0 | 4 ms | no change in sound; the delay reported to the phone includes the USB queue |
+
+No audible change in the delay: the Pi's settings are not where the 0.5 s is. The one Pi-side lever that matters is the radio (the jitter buffer): a hotspot on 5 GHz
+(*Wi-Fi and Bluetooth*, above) keeps it near its 20 ms minimum, and is also the first fix
+for the hiccups.
+
+Back to the old values: in `~/ipod-gadget/extras/pi-audio/wireplumber/50-aucd-ipod.conf` delete
+the `latency.internal.ns` line, in
+`.../pipewire/50-aucd-ipod.conf` delete the three `default.clock.*quantum` lines, then `sudo
+bash ~/ipod-gadget/extras/pi-audio/install.sh` (it restarts PipeWire). Any time `pw-top`
+shows ERR going up on the iPod output while driving, try more headroom (2048) and send me the
+`aucd-audio-diag hiccup` file.
+
+### Measure on the Pi
+
+While the phone plays, as your user (with `sudo`, `aucd-audio-diag` finds the user itself):
+
+```bash
+aucd-audio-diag latency          # the Pi's share: jitter buffer, ALSA (sampled), USB queue, total
+aucd-bt status                   # codec, and "delay reported N ms" (A2DP delay reporting, below)
+pw-top                           # iPod output: QUANT 512, RATE 44100; ERR = xruns since PipeWire started
+pactl list sinks | grep -E 'Name:|Latency:'
+cat /proc/asound/iPodUSB/pcm0p/sub0/hw_params                    # the ALSA ceiling, not the delay
+grep -E 'state|delay|avail' /proc/asound/iPodUSB/pcm0p/sub0/status # delay: frames queued right now
+pw-dump > ~/pw-dump.json         # everything PipeWire knows, to send
+```
+
+End to end, in the car, with a second phone filming in slow motion (240 fps, 4.2 ms a frame):
+GarageBand's drums on the iPhone, film the finger hitting a pad and listen for the drum.
+(a) Bluetooth off, the iPhone's own speaker: its touch-to-sound time. (b) Through AUCD and the
+car. (b) - (a) is the iPhone's A2DP sending + the Pi + the head unit. Optionally (c), the
+phone on the car's own Bluetooth: if (c) is about (b), the Pi adds nothing a car's own
+Bluetooth wouldn't.
+
+### A2DP delay reporting and lip sync
+
+Already on, nothing to switch on: PipeWire 1.4.2 registers its A2DP endpoints with
+`DelayReporting` and, as the A2DP sink, sets BlueZ's `MediaTransport1.Delay` to the jitter
+buffer's target plus everything after it in PipeWire (cycle, iPod output headroom,
+`latency.internal.ns`) whenever that changes; BlueZ sends it to the phone as an AVDTP Delay
+Report, if the phone asked for delay reporting (iPhones do; **to verify**). The report doesn't
+make the sound earlier: the phone delays its video by it, for lip sync. Check:
+
+```bash
+aucd-bt status                                              # ... audio: SBC active, delay reported 85.3 ms
+sudo btmon | grep -i -A3 'delay report'                     # while the phone starts playing; ctrl-c
+```
+
+What the Pi can't know is the head unit's own delay. To measure it and put it in the report:
+
+1. On the iPhone, a lip-sync test video (YouTube, "audio video sync test": a flash and a
+   beep), sound through AUCD to the car.
+2. Film the iPhone's screen with the second phone in slow motion, the car's speakers audible.
+   Count the frames from the flash to the beep: a beep after the flash is what the phone
+   wasn't told about, i.e. mostly the head unit.
+3. Add it to `latency.internal.ns` in `~/ipod-gadget/extras/pi-audio/wireplumber/50-aucd-ipod.conf`
+   (beep 120 ms late: `4000000 + 120000000 = 124000000`), `sudo bash
+   ~/ipod-gadget/extras/pi-audio/install.sh`, reconnect the phone, film again. `aucd-bt
+   status` shows the larger delay. Tell me the number, so it goes into the repository too
+   (install.sh copies the repository's file over `/etc`).
+
+### Start-up hiccups: likely causes, most likely first
+
+1. **The Bluetooth jitter buffer learning.** PipeWire starts it at one cycle rounded up to
+   20 ms and only grows it after it runs dry: every packet later than the buffer covers is a
+   break, after which the buffer is 1.5 x that gap, kept for 2 minutes. A few breaks, then
+   fine, is exactly that. It starts from scratch whenever the stream (re)starts: after a
+   connect, and after a pause long enough for the iPhone to suspend the stream (`aucd-bt
+   status` then shows the transport `idle`; how long the iPhone waits is to verify).
+   **Test:** pause the phone for 30 s in the middle of a drive and play again; breaks again
+   means this. PipeWire 1.4 has no setting for it with A2DP (a fixed target exists only for
+   LE Audio), so the fix is fewer late packets (2).
+2. **Wi-Fi at start-up on the shared 2.4 GHz radio:** the hotspot coming up, clients joining,
+   scans, the dash's traffic, all right when the jitter buffer is still small. **Test:** one
+   drive with the hotspot on 5 GHz, or off (`sudo nmcli radio wifi off`).
+3. **The car switching its audio interface (alt setting 0/1)** while it starts its iPod mode:
+   g_ipod_audio carries on without stalling anything (tested in QEMU), but each switch is a
+   gap in what the car plays. The kernel logs each: `ipod-gadget-audio: audio start` /
+   `audio stop`.
+4. **The Pi missing graph cycles at boot** (the browser and the dash starting, PipeWire
+   itself): xruns on the iPod output, `pw-top` ERR going up, `XRun!` in PipeWire's log with
+   logs on. Less likely on a Pi 5 with 11.6 ms cycles. PipeWire or WirePlumber starting
+   late shows as no sound at first rather than breaks: the phone can't connect before
+   WirePlumber offers the speaker.
+5. **A2DP connect and codec negotiation** happen before any sound, so they delay the first
+   sound rather than break it; a codec change in the middle (`phone: codec ...` in the iAP
+   client's log) would restart the stream, and with it (1).
+
+### Right after a hiccup
+
+```bash
+sudo aucd-audio-diag logs on     # once, at home: PipeWire at info (every xrun), the jitter buffer
+                                 # once a second; restarts PipeWire, the phone reconnects by itself
+# drive; right after a break (parked, or a passenger):
+sudo aucd-audio-diag hiccup      # the last 3 minutes (hiccup 10: the last 10), saved to ~/aucd-hiccup-<time>.log
+sudo aucd-audio-diag logs off    # when done (aucd-audio-check warns while it's on)
+```
+
+It collects the xrun counters (`pw-top` ERR of the iPod output and the phone's stream),
+the iPodUSB PCM state, `get_throttled`, the load, `aucd-bt status`, and from the journal: the
+kernel (`audio start` / `audio stop`, USB, the radio), PipeWire and WirePlumber, bluetoothd,
+the iAP client's audio and codec lines, NetworkManager. By hand, the same:
+
+```bash
+sudo journalctl -k --since -3min -o short-precise | grep -iE 'ipod|dwc2|brcmf|bluetooth'
+sudo journalctl _UID=$(id -u "$USER") _SYSTEMD_USER_UNIT=pipewire.service _SYSTEMD_USER_UNIT=wireplumber.service --since -3min -o short-precise
+sudo journalctl -u bluetooth -u ipod-client -u NetworkManager --since -3min -o short-precise
+pw-top -b -n 2 | grep -E 'snd_usb_ipod|bluez'
+```
+
+At the time of the break: `audio stop` / `audio start` is the car (3); ERR up or `XRun!`
+is the Pi (4); WirePlumber's `target:` / `spike:` jumping with no xrun is late Bluetooth
+packets (1, 2); Wi-Fi events in the same second point at the radio (2).
+
+### To verify on the Pi
+
+- `sudo aucd-audio-check`: all `OK` as before, plus `graph cycle at least 512 samples`;
+  `pw-top` shows QUANT 512 on the iPod output with and without the phone playing.
+- `aucd-audio-diag latency` while the phone plays: the jitter buffer's target, ALSA queued
+  about 35-46 ms, and `aucd-bt status` showing `delay reported`.
+- A drive of 30 minutes or more: ERR of the iPod output in `pw-top` stays 0 with the 512 cycle.
+- `sudo btmon` shows the Delay Report; with logs on, WirePlumber's journal has a `target:`
+  line once a second while the phone plays.
+- The car-absent case is untouched (g_ipod_audio didn't change; the cycle and headroom don't
+  matter while it keeps time itself), but the QEMU test wasn't rerun.
+
+Tested in a cloud session (no Pi, car, phone or sound card): the configs load without errors
+in PipeWire 1.4.7 / WirePlumber 0.5.10 (Ubuntu 25.10 chroot), `pw-metadata -n settings` shows
+quantum 512 / min 512 / max 512 and a stand-in sink named like the iPod output runs at 512;
+`aucd-audio-diag latency`, `hiccup` and `logs on|off` run against the real `pw-dump` /
+`pw-top` output; a `log.level` pattern in a WirePlumber conf.d file turns on debug for a SPA
+plugin loaded later (the bluez5 topic itself is to verify on the Pi).
 
 ## q60-pi-dash
 
